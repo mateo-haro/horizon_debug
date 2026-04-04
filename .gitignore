@@ -1,0 +1,29 @@
+# External reference repos kept locally for context only.
+DiT/
+cosmos-predict2/
+
+# Local scratch/context artifacts.
+horizon.o/
+.codex
+
+# Python caches and virtualenvs.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Test and coverage artifacts.
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build and packaging artifacts.
+build/
+dist/
+*.egg-info/
+
+# IDE / OS noise.
+.DS_Store
+.idea/
+.vscode/

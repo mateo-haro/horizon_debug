@@ -1,0 +1,16 @@
+includes:
+  - ../data/mock_libero.yaml
+  - ../model/action_dit_small.yaml
+  - ../train/base.yaml
+
+experiment:
+  name: oracle_future_debug
+
+future_source:
+  name: oracle_clean
+  noise_std: 0.15
+  token_dropout_prob: 0.1
+  mix_probabilities:
+    current_only: 0.2
+    oracle_clean: 0.4
+    oracle_noised: 0.4
