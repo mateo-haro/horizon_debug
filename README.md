@@ -89,14 +89,28 @@ By default the scripts use a synthetic LIBERO-like dataset and a lightweight vis
 
 ## Real Cosmos Integration
 
-`CosmosAdapter` already defines the boundary that the rest of the repo uses:
+`CosmosAdapter` defines the boundary that the rest of the repo uses:
 
 - `encode_current_frames(...)`
 - `encode_future_frames(...)`
 - `maybe_generate_future_features(...)`
 - `maybe_extract_intermediate_features(...)`
 
-To attach real Cosmos Predict2 later, implement those methods with the external runtime and keep the output shape contract unchanged.
+To run the **Hugging Face Diffusers** snippet (`Cosmos2VideoToWorldPipeline`, see `src/libero_future_policy/backbones/cosmos_test.py`), install **diffusers >= 0.34** (Horizon does not pin it by default): `pip install -U "diffusers>=0.34"` or `pip install -e ".[diffusers_cosmos]"`.
+
+Install Predict2 into the same environment (Python 3.10, CUDA) using NVIDIA’s index, for example:
+
+```bash
+uv pip install -U "cosmos-predict2[cu126]" --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/cu126_torch260/simple
+```
+
+If imports fail with Transformer Engine / ``ldconfig`` / ``libnvrtc``, `CosmosAdapter` tries to set ``CUDA_PATH`` to pip’s ``nvidia-cuda-nvrtc`` layout before loading Cosmos. Disable that with ``HORIZON_SKIP_NVRTC_BOOTSTRAP=1`` if it conflicts with your CUDA layout.
+
+Default Predict2 Video2World weights and the T5-11B text encoder are resolved under a checkpoints **root** (parent of ``nvidia/`` and ``google-t5/``): set ``COSMOS_CHECKPOINTS_DIR``, YAML ``cosmos_checkpoints_root``, or use the default ``~/.cache/horizon/cosmos_checkpoints``. With ``cosmos_auto_fetch_checkpoints: true`` (default), missing files are downloaded from Hugging Face (``nvidia/Cosmos-Predict2-{size}-Video2World`` and ``google-t5/t5-11b``) the first time a CUDA pipeline is built.
+
+Enable it in YAML under `backbone` with `use_external_cosmos: true` and set checkpoint-related options (`cosmos_dit_path`, `cosmos_model_size`, `cosmos_resolution`, `cosmos_fps`, `cosmos_aspect_ratio`, `cosmos_natten`) as needed. Weights are loaded from the Cosmos checkpoint at startup and are not stored in Horizon checkpoints.
+
+`maybe_extract_intermediate_features` runs a single Video2World denoise step, captures the DiT activation **after** block `cosmos_block_index`, and returns either a mean-pooled `[B, feature_dim]` vector (with an optional linear projection) or the full patch grid `[B, T', H', W', D]` when `cosmos_intermediate_pool: none`. It requires **CUDA** and input `frames` on **cuda**; otherwise it returns `None` (CPU training stays valid).
 
 ## Training Stages
 

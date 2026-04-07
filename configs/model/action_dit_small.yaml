@@ -3,6 +3,18 @@ backbone:
   use_external_cosmos: false
   external_cosmos_module: null
   freeze_backbone: false
+  cosmos_block_index: 0
+  cosmos_model_size: "2B"
+  cosmos_resolution: "720"
+  cosmos_fps: 16
+  cosmos_aspect_ratio: "16:9"
+  cosmos_natten: false
+  cosmos_dit_path: null
+  cosmos_checkpoints_root: null
+  cosmos_auto_fetch_checkpoints: true
+  cosmos_default_prompt: ""
+  cosmos_num_conditional_frames: 1
+  cosmos_intermediate_pool: mean
 
 model:
   action_dim: 7

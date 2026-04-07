@@ -95,6 +95,18 @@ class Trainer:
                 external_cosmos_module=backbone_cfg.external_cosmos_module,
                 freeze_backbone=backbone_cfg.freeze_backbone,
                 image_channels=self.config.data.image_channels,
+                cosmos_block_index=backbone_cfg.cosmos_block_index,
+                cosmos_model_size=backbone_cfg.cosmos_model_size,
+                cosmos_resolution=backbone_cfg.cosmos_resolution,
+                cosmos_fps=backbone_cfg.cosmos_fps,
+                cosmos_aspect_ratio=backbone_cfg.cosmos_aspect_ratio,
+                cosmos_natten=backbone_cfg.cosmos_natten,
+                cosmos_dit_path=backbone_cfg.cosmos_dit_path,
+                cosmos_checkpoints_root=backbone_cfg.cosmos_checkpoints_root,
+                cosmos_auto_fetch_checkpoints=backbone_cfg.cosmos_auto_fetch_checkpoints,
+                cosmos_default_prompt=backbone_cfg.cosmos_default_prompt,
+                cosmos_num_conditional_frames=backbone_cfg.cosmos_num_conditional_frames,
+                cosmos_intermediate_pool=backbone_cfg.cosmos_intermediate_pool,
             )
         )
 

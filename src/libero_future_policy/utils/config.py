@@ -37,6 +37,18 @@ class BackboneConfig:
     use_external_cosmos: bool = False
     external_cosmos_module: str | None = None
     freeze_backbone: bool = False
+    cosmos_block_index: int = 0
+    cosmos_model_size: str = "2B"
+    cosmos_resolution: str = "720"
+    cosmos_fps: int = 16
+    cosmos_aspect_ratio: str = "16:9"
+    cosmos_natten: bool = False
+    cosmos_dit_path: str | None = None
+    cosmos_checkpoints_root: str | None = None
+    cosmos_auto_fetch_checkpoints: bool = True
+    cosmos_default_prompt: str = ""
+    cosmos_num_conditional_frames: int = 1
+    cosmos_intermediate_pool: str = "mean"
 
 
 @dataclass
