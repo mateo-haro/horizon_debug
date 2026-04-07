@@ -1,10 +1,10 @@
 # Full lock of horizon/.venv (uv pip freeze). Reproduce the env with the same Python version, then:
 # (Adjust CUDA / Cosmos index URLs if you use a different stack.)
-"""
-pip install -r requirements.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu126 \
-    --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/cu126_torch260/simple
-"""
+
+# pip install -r requirements.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cu126 \
+#     --extra-index-url https://nvidia-cosmos.github.io/cosmos-dependencies/cu126_torch260/simple
+
 accelerate==1.13.0
 aniso8601==10.0.1
 annotated-types==0.7.0
