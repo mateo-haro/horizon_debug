@@ -16,6 +16,9 @@ Run from repo root::
 
     python scripts/cosmos_intermediate_demo.py
 
+First-time weights (Video2World + T5) download under the checkpoints **root** chosen by
+``--checkpoints-root``, or env ``COSMOS_CHECKPOINTS_DIR``, or ``~/.cache/horizon/cosmos_checkpoints``.
+
 By default, missing prerequisites print a skip message to stderr and exit 0.
 Use ``--require-success`` to exit 1 when feature extraction does not run.
 """
@@ -52,6 +55,15 @@ def main() -> None:
     )
     parser.add_argument("--prompt", type=str, default="A robot arm manipulates objects on a table.", help="Text prompt.")
     parser.add_argument("--dit-path", type=str, default=None, help="Override path to DiT checkpoint.")
+    parser.add_argument(
+        "--checkpoints-root",
+        type=str,
+        default=None,
+        help=(
+            "Directory whose children include nvidia/... and google-t5/... "
+            "(default: COSMOS_CHECKPOINTS_DIR or ~/.cache/horizon/cosmos_checkpoints)."
+        ),
+    )
     parser.add_argument("--pool", type=str, choices=("mean", "none"), default="mean", help="cosmos_intermediate_pool.")
     parser.add_argument("--model-size", type=str, default="2B", help="Cosmos Video2World model size.")
     parser.add_argument("--resolution", type=str, default="720", help="e.g. 720 or 480.")
@@ -100,6 +112,7 @@ def main() -> None:
                 cosmos_aspect_ratio=args.aspect_ratio,
                 cosmos_natten=args.natten,
                 cosmos_dit_path=args.dit_path,
+                cosmos_checkpoints_root=args.checkpoints_root,
                 cosmos_default_prompt="",
                 cosmos_num_conditional_frames=1,
                 cosmos_intermediate_pool=args.pool,
