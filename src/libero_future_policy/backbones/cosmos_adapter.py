@@ -91,11 +91,13 @@ def _apply_cosmos_predict2_checkpoints_root(checkpoints_root: Path) -> None:
             importlib.reload(sys.modules[mod_name])
 
 
-def _prepare_cosmos_checkpoints_directory(config: CosmosAdapterConfig) -> Path | None:
+def _prepare_cosmos_checkpoints_directory(config: CosmosAdapterConfig) -> tuple[Path | None, str | None]:
     """Ensure ``ROOT/nvidia/Cosmos-Predict2-{size}-Video2World/`` and T5 under ``ROOT/google-t5/t5-11b``.
 
     Uses ``COSMOS_CHECKPOINTS_DIR``, ``cosmos_checkpoints_root``, or ``~/.cache/horizon/cosmos_checkpoints``.
     Optionally downloads from Hugging Face when ``cosmos_auto_fetch_checkpoints`` is True.
+
+    Returns ``(root, None)`` on success, or ``(None, reason)`` when checkpoints cannot be prepared.
     """
     if config.cosmos_checkpoints_root:
         root = Path(config.cosmos_checkpoints_root).expanduser()
@@ -123,20 +125,25 @@ def _prepare_cosmos_checkpoints_directory(config: CosmosAdapterConfig) -> Path |
 
     if not video_ready() or not t5_ready():
         if not config.cosmos_auto_fetch_checkpoints:
-            warnings.warn(
-                "Cosmos checkpoints missing and cosmos_auto_fetch_checkpoints is False. "
-                f"Expected model at {model_path}, tokenizer at {tokenizer_path}, T5 under {t5_dir}.",
-                stacklevel=2,
+            reason = (
+                "Checkpoints are missing and auto-download is disabled "
+                f"(cosmos_auto_fetch_checkpoints=False). Expected Video2World weights at {model_path}, "
+                f"tokenizer at {tokenizer_path}, and T5 config at {t5_dir / 'config.json'}. "
+                "Enable auto-fetch, install huggingface_hub and download, or pass --checkpoints-root / set "
+                "COSMOS_CHECKPOINTS_DIR to a tree that already contains these paths."
             )
-            return None
+            warnings.warn(reason, stacklevel=2)
+            return None, reason
         try:
             from huggingface_hub import snapshot_download
         except ImportError:
-            warnings.warn(
-                "Cosmos checkpoints missing and huggingface_hub is not installed; cannot auto-download.",
-                stacklevel=2,
+            reason = (
+                "Checkpoints are missing and huggingface_hub is not installed, so auto-download cannot run. "
+                f"Install huggingface_hub or place weights manually: {model_path}, {tokenizer_path}, "
+                f"{t5_dir / 'config.json'}."
             )
-            return None
+            warnings.warn(reason, stacklevel=2)
+            return None, reason
         try:
             if not video_ready():
                 video_dir.mkdir(parents=True, exist_ok=True)
@@ -153,12 +160,17 @@ def _prepare_cosmos_checkpoints_directory(config: CosmosAdapterConfig) -> Path |
                     local_dir_use_symlinks=False,
                 )
         except Exception as exc:
-            warnings.warn(f"Cosmos checkpoint download failed: {exc}", stacklevel=2)
-            return None
+            reason = f"Cosmos checkpoint download from Hugging Face failed ({type(exc).__name__}: {exc})."
+            warnings.warn(reason, stacklevel=2)
+            return None, reason
 
     if not video_ready() or not t5_ready():
-        return None
-    return root
+        reason = (
+            "Checkpoints are still incomplete after download or layout mismatch. "
+            f"Expected {model_path}, {tokenizer_path}, and {t5_dir / 'config.json'}."
+        )
+        return None, reason
+    return root, None
 
 
 class CosmosAdapter(nn.Module):
@@ -169,6 +181,7 @@ class CosmosAdapter(nn.Module):
     """
 
     cosmos_intermediate_proj: nn.Linear | None
+    cosmos_pipeline_load_error: str | None
 
     def __init__(self, config: CosmosAdapterConfig) -> None:
         super().__init__()
@@ -176,6 +189,7 @@ class CosmosAdapter(nn.Module):
         self.feature_dim = config.feature_dim
         self.runtime: Any | None = None
         self._cosmos_pipe: Any | None = None
+        self.cosmos_pipeline_load_error = None
         self.encoder = SimpleVisualFeatureExtractor(
             in_channels=config.image_channels,
             feature_dim=config.feature_dim,
@@ -214,14 +228,19 @@ class CosmosAdapter(nn.Module):
             return None
 
     def _load_cosmos_pipeline(self) -> None:
+        self.cosmos_pipeline_load_error = None
         _ensure_transformer_engine_nvrtc_path()
         if not torch.cuda.is_available():
+            self.cosmos_pipeline_load_error = (
+                "CUDA is not available; the Video2World pipeline is only loaded when torch.cuda.is_available() is True."
+            )
             self._cosmos_pipe = None
             return
 
         # Avoid multi-GB HF downloads when no GPU will run the pipeline.
-        checkpoints_root = _prepare_cosmos_checkpoints_directory(self.config)
+        checkpoints_root, ckpt_error = _prepare_cosmos_checkpoints_directory(self.config)
         if checkpoints_root is None:
+            self.cosmos_pipeline_load_error = ckpt_error or "Checkpoint directory could not be prepared (unknown reason)."
             self._cosmos_pipe = None
             return
         _apply_cosmos_predict2_checkpoints_root(checkpoints_root)
@@ -231,7 +250,11 @@ class CosmosAdapter(nn.Module):
             from cosmos_predict2.configs.base.config_video2world import get_cosmos_predict2_video2world_pipeline
             from cosmos_predict2.pipelines.video2world import Video2WorldPipeline
             from imaginaire.constants import get_cosmos_predict2_video2world_checkpoint
-        except ImportError:
+        except ImportError as exc:
+            self.cosmos_pipeline_load_error = (
+                "Could not import the Cosmos Predict2 Python stack (cosmos_predict2, imaginaire, attrs, or a "
+                f"transitive dependency). Install cosmos-predict2 in this environment. ImportError: {exc}"
+            )
             self._cosmos_pipe = None
             return
 
@@ -262,7 +285,12 @@ class CosmosAdapter(nn.Module):
                 torch_dtype=torch.bfloat16,
             )
         except Exception as exc:
-            warnings.warn(f"Video2WorldPipeline.from_config failed: {exc}", stacklevel=2)
+            self.cosmos_pipeline_load_error = (
+                f"Video2WorldPipeline.from_config failed ({type(exc).__name__}: {exc}). "
+                f"dit_path={dit_path!r}. Check GPU memory, checkpoint integrity, and that this resolution/fps/aspect "
+                "match the weights; you can override weights with cosmos_dit_path / --dit-path."
+            )
+            warnings.warn(self.cosmos_pipeline_load_error, stacklevel=2)
             self._cosmos_pipe = None
 
     def _encode_frames(self, frames: torch.Tensor) -> torch.Tensor:

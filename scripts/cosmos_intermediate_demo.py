@@ -85,7 +85,7 @@ def main() -> None:
         raise SystemExit(code if not args.require_success else 1)
 
     if not torch.cuda.is_available():
-        skip("Skip: CUDA is not available.")
+        skip("Skip: CUDA is not available (torch.cuda.is_available() is False). A GPU and CUDA build of PyTorch are required.")
 
     frames = torch.rand(
         1,
@@ -122,9 +122,13 @@ def main() -> None:
         skip(f"Skip: CosmosAdapter failed during init ({type(exc).__name__}: {exc}).")
 
     if getattr(adapter, "_cosmos_pipe", None) is None:
+        reason = getattr(adapter, "cosmos_pipeline_load_error", None)
+        if reason:
+            skip(f"Skip: Cosmos pipeline did not load.\nReason: {reason}")
         skip(
-            "Skip: Cosmos pipeline did not load (missing packages, checkpoint, or load error). "
-            "Install cosmos-predict2 and ensure weights are available or pass --dit-path.",
+            "Skip: Cosmos pipeline did not load and no detailed reason was recorded. "
+            "If use_external_cosmos is True, install cosmos-predict2, place checkpoints under "
+            "COSMOS_CHECKPOINTS_DIR or --checkpoints-root, or pass --dit-path.",
         )
 
     denoise_level = None if args.random_sigma else args.denoise_level
