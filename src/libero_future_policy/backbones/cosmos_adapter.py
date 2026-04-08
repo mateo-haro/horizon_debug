@@ -4,6 +4,7 @@ import glob
 import importlib
 import math
 import os
+import resource
 import shlex
 import site
 import sys
@@ -40,6 +41,53 @@ class CosmosAdapterConfig:
     cosmos_default_prompt: str = ""
     cosmos_num_conditional_frames: int = 1
     cosmos_intermediate_pool: str = "mean"
+    # T5-11b on GPU during pipeline init often causes OOM (host kills process, exit 137); offload keeps it on CPU until encode_prompt.
+    cosmos_offload_text_encoder: bool = True
+    cosmos_downcast_text_encoder: bool = True
+    cosmos_verbose_load: bool = False
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cosmos_should_log_verbose(config: CosmosAdapterConfig) -> bool:
+    return bool(config.cosmos_verbose_load) or _env_truthy("HORIZON_COSMOS_DEBUG")
+
+
+def _cosmos_load_log(config: CosmosAdapterConfig, msg: str) -> None:
+    if _cosmos_should_log_verbose(config):
+        print(f"[CosmosAdapter] {msg}", file=sys.stderr, flush=True)
+
+
+def _process_rss_mb() -> float | None:
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux: kilobytes; macOS: bytes
+        if sys.platform == "darwin":
+            return float(rss) / (1024 * 1024)
+        return float(rss) / 1024.0
+    except Exception:
+        return None
+
+
+def _cuda_mem_line(device_index: int = 0) -> str:
+    if not torch.cuda.is_available():
+        return "cuda: n/a"
+    parts = [
+        f"alloc={torch.cuda.memory_allocated(device_index) / 1e9:.2f}GB",
+        f"reserved={torch.cuda.memory_reserved(device_index) / 1e9:.2f}GB",
+    ]
+    try:
+        free_b, total_b = torch.cuda.mem_get_info(device_index)
+        parts.append(f"free={free_b / 1e9:.2f}GB")
+        parts.append(f"total={total_b / 1e9:.2f}GB")
+    except Exception:
+        pass
+    rss = _process_rss_mb()
+    if rss is not None:
+        parts.append(f"proc_max_rss~={rss:.0f}MB")
+    return "cuda: " + ", ".join(parts)
 
 
 def _ensure_transformer_engine_nvrtc_path() -> None:
@@ -276,15 +324,29 @@ class CosmosAdapter(nn.Module):
             aspect_ratio=self.config.cosmos_aspect_ratio,
             natten=self.config.cosmos_natten,
         )
+        _cosmos_load_log(
+            self.config,
+            f"loading Video2WorldPipeline | offload_text_encoder={self.config.cosmos_offload_text_encoder} "
+            f"downcast_text_encoder={self.config.cosmos_downcast_text_encoder} | dit_path={dit_path!r} | "
+            f"{_cuda_mem_line()}",
+        )
         try:
+            _cosmos_load_log(self.config, "calling Video2WorldPipeline.from_config (after tokenizer: text encoder, then DiT)…")
             self._cosmos_pipe = Video2WorldPipeline.from_config(
                 config=cfg,
                 dit_path=dit_path,
                 load_prompt_refiner=False,
                 device="cuda",
                 torch_dtype=torch.bfloat16,
+                offload_text_encoder=self.config.cosmos_offload_text_encoder,
+                downcast_text_encoder=self.config.cosmos_downcast_text_encoder,
             )
+            _cosmos_load_log(self.config, f"Video2WorldPipeline ready | {_cuda_mem_line()}")
         except Exception as exc:
+            _cosmos_load_log(
+                self.config,
+                f"Video2WorldPipeline.from_config failed ({type(exc).__name__}: {exc}) | {_cuda_mem_line()}",
+            )
             self.cosmos_pipeline_load_error = (
                 f"Video2WorldPipeline.from_config failed ({type(exc).__name__}: {exc}). "
                 f"dit_path={dit_path!r}. Check GPU memory, checkpoint integrity, and that this resolution/fps/aspect "
@@ -388,7 +450,9 @@ class CosmosAdapter(nn.Module):
         b, _, t, h, w = video_bc_thw.shape
         effective = prompt if prompt else self.config.cosmos_default_prompt
         prompts = [effective] * b
+        _cosmos_load_log(self.config, f"encode_prompt (T5) start | {_cuda_mem_line()}")
         emb = pipe.encode_prompt(prompts).to(dtype=pipe.torch_dtype)
+        _cosmos_load_log(self.config, f"encode_prompt (T5) done | {_cuda_mem_line()}")
         data_batch: dict[str, Any] = {
             "dataset_name": "video_data",
             pipe.input_video_key: video_bc_thw,
@@ -457,14 +521,18 @@ class CosmosAdapter(nn.Module):
         hook_handle = pipe.dit.blocks[k].register_forward_hook(_hook)
         try:
             with torch.no_grad():
+                _cosmos_load_log(self.config, f"maybe_extract_intermediate_features: prepare pixels | {_cuda_mem_line()}")
                 video = self._prepare_pixels_for_cosmos(frames)
+                _cosmos_load_log(self.config, f"maybe_extract_intermediate_features: build batch | {_cuda_mem_line()}")
                 data_batch = self._build_cosmos_data_batch(video, text_prompt)
                 _, x0, condition = pipe.get_data_and_condition(data_batch)
+                _cosmos_load_log(self.config, f"maybe_extract_intermediate_features: denoise | {_cuda_mem_line()}")
                 b = x0.shape[0]
                 sigma_bt = self._sample_sigma_bt(b, x0.device, denoise_level)
                 epsilon = torch.randn_like(x0)
                 xt = x0 + epsilon * rearrange(sigma_bt.to(dtype=x0.dtype), "b t -> b 1 t 1 1")
                 pipe.denoise(xt, sigma_bt.to(dtype=x0.dtype), condition, use_cuda_graphs=False)
+                _cosmos_load_log(self.config, f"maybe_extract_intermediate_features: denoise done | {_cuda_mem_line()}")
         finally:
             hook_handle.remove()
 

@@ -21,6 +21,12 @@ First-time weights (Video2World + T5) download under the checkpoints **root** ch
 
 By default, missing prerequisites print a skip message to stderr and exit 0.
 Use ``--require-success`` to exit 1 when feature extraction does not run.
+
+If the process dies with **exit code 137**, the Linux OOM killer often SIGKILL'd it
+(no Python stack trace). After the tokenizer loads, the pipeline loads T5-11b and
+the DiT; peak VRAM is large. This repo defaults to ``offload_text_encoder=True`` so
+T5 stays on CPU until ``encode_prompt``. Use ``--verbose`` for stage + VRAM logs; try
+``--resolution 480`` or a smaller GPU model if it still fails.
 """
 from __future__ import annotations
 
@@ -78,6 +84,16 @@ def main() -> None:
         action="store_true",
         help="Exit 1 if CUDA, pipeline load, or extraction fails (default: exit 0 when skipped).",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print load/feature stages and CUDA memory (also: HORIZON_COSMOS_DEBUG=1).",
+    )
+    parser.add_argument(
+        "--gpu-text-encoder",
+        action="store_true",
+        help="Keep T5 on GPU during pipeline init (higher VRAM; default is CPU offload).",
+    )
     args = parser.parse_args()
 
     def skip(msg: str, code: int = 0) -> None:
@@ -87,15 +103,11 @@ def main() -> None:
     if not torch.cuda.is_available():
         skip("Skip: CUDA is not available (torch.cuda.is_available() is False). A GPU and CUDA build of PyTorch are required.")
 
-    frames = torch.rand(
-        1,
-        3,
-        args.time_frames,
-        args.height,
-        args.width,
-        device="cuda",
-        dtype=torch.float32,
-    ).clamp(0.0, 1.0)
+    def _vprint(msg: str) -> None:
+        if args.verbose:
+            print(f"[cosmos_intermediate_demo] {msg}", file=sys.stderr, flush=True)
+
+    _vprint("building CosmosAdapter (loads checkpoints + Video2WorldPipeline; may take minutes)…")
 
     try:
         adapter = CosmosAdapter(
@@ -116,10 +128,25 @@ def main() -> None:
                 cosmos_default_prompt="",
                 cosmos_num_conditional_frames=1,
                 cosmos_intermediate_pool=args.pool,
+                cosmos_offload_text_encoder=not args.gpu_text_encoder,
+                cosmos_verbose_load=args.verbose,
             )
         )
     except Exception as exc:
         skip(f"Skip: CosmosAdapter failed during init ({type(exc).__name__}: {exc}).")
+
+    _vprint("CosmosAdapter __init__ returned")
+
+    frames = torch.rand(
+        1,
+        3,
+        args.time_frames,
+        args.height,
+        args.width,
+        device="cuda",
+        dtype=torch.float32,
+    ).clamp(0.0, 1.0)
+    _vprint(f"dummy frames on CUDA: {tuple(frames.shape)}")
 
     if getattr(adapter, "_cosmos_pipe", None) is None:
         reason = getattr(adapter, "cosmos_pipeline_load_error", None)
@@ -132,11 +159,13 @@ def main() -> None:
         )
 
     denoise_level = None if args.random_sigma else args.denoise_level
+    _vprint("calling maybe_extract_intermediate_features (T5 encode + DiT denoise)…")
     features = adapter.maybe_extract_intermediate_features(
         frames,
         denoise_level=denoise_level,
         prompt=args.prompt,
     )
+    _vprint("maybe_extract_intermediate_features returned")
     if features is None:
         skip("Skip: maybe_extract_intermediate_features returned None (unexpected after pipeline load).")
 
