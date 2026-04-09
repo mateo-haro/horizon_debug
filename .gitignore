@@ -12,6 +12,7 @@ __pycache__/
 .venv/
 venv/
 env/
+outputs/
 
 # Test and coverage artifacts.
 .pytest_cache/
@@ -27,3 +28,4 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+notebooks/

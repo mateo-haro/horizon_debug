@@ -4,12 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "horizon"
-version = "0.1.0"
-description = "Future-conditioned action flow-matching policies for LIBERO."
+version = "0.3.0"
+description = "Future-conditioned ActionDiT policy package for LIBERO on top of LeRobot."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24",
     "PyYAML>=6.0",
     "torch>=2.1",
 ]

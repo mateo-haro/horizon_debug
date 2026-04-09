@@ -1,28 +1,46 @@
-# horizon
+# Horizon
 
-Research-grade LIBERO training scaffold for future-conditioned action policies.
+`Horizon` mimic-video inspired Video Action Model.
 
-This repo owns:
+The core idea is unchanged:
 
-- LIBERO-style dataset window sampling
-- future-conditioning abstractions
-- a robotics-specific ActionDiT for action chunks
-- a flow-matching training path
-- training and evaluation loops
+- action policy: robotics-specific ActionDiT trained with flow matching
+- conditioning: current visual features, future visual features, optional proprio, optional task text
+- world-model boundary: Cosmos stays external behind adapters
+- future signal: clean encodings, noised encodings, or intermediate denoiser hidden layers at noise level `tau`
 
-This repo does not vendor Cosmos Predict2 or the official `facebookresearch/DiT` implementation. Cosmos is treated as an external dependency behind a wrapper in `src/libero_future_policy/backbones/cosmos_adapter.py`.
+Dependencies:
+
+- datasets: reuse public LeRobot LIBERO datasets on the Hugging Face Hub
+- training loop: target LeRobot's train loop through a custom policy plugin package
+- task metadata: reuse public LIBERO suite classes 
+
+This repo owns only the parts that are actually custom:
+
+- `horizon_dit` policy config and model
+- ActionDiT implementation
+- future-source abstraction
+- Cosmos encoding / hidden-layer adapter
+- thin training launcher and AWS bootstrap
 
 ## Architecture
 
-The first working path trains an action flow-matching transformer on action chunks conditioned on:
+The policy package lives in [src/lerobot_policy_horizon](/media/eandre/PortableSSD/ETHRC/horizon/src/lerobot_policy_horizon).
 
-- current visual features
-- future visual features
-- optional proprio
-- optional task text
-- future source identity
+The important boundary is the Cosmos adapter:
 
-The conditioning contract is source-agnostic:
+- `encode(...)`
+- `denoise_to_tau(...)`
+- `get_nth_hidden_layer(...)`
+- `extract_hidden_features(...)`
+
+This lets you do exactly:
+
+1. encode current or future frames
+2. denoise to a chosen `tau`
+3. extract hidden layer `n`
+
+The policy then conditions ActionDiT on:
 
 ```python
 {
@@ -35,17 +53,14 @@ The conditioning contract is source-agnostic:
 }
 ```
 
-Supported now:
+Supported future sources:
 
 - `current_only`
 - `oracle_clean`
 - `oracle_noised`
-- `mixed` over the above
-
-Stubbed for later:
-
-- `generated`
-- intermediate Cosmos denoiser-state features
+- `oracle_hidden`
+- `mixed`
+- `generated` For actual inference
 
 ## Repo Tree
 
@@ -54,68 +69,209 @@ Stubbed for later:
 ├── README.md
 ├── pyproject.toml
 ├── requirements.txt
-├── configs
-│   ├── data
-│   ├── experiment
-│   ├── model
-│   └── train
-├── scripts
-│   ├── extract_debug_batch.py
-│   ├── train_mixed_future.py
-│   └── train_oracle_future.py
-├── src
-│   └── libero_future_policy
-│       ├── backbones
-│       ├── conditioning
-│       ├── data
-│       ├── future_sources
-│       ├── models
-│       ├── train
-│       └── utils
-└── tests
+├── configs/train/
+│   └── libero_horizon_oracle_hidden.yaml
+├── scripts/
+│   ├── aws_bootstrap.sh
+│   ├── test_horizon_stack.py
+│   └── train_horizon_libero.py
+├── src/
+│   ├── horizon/
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   ├── lerobot.py
+│   │   └── libero.py
+│   └── lerobot_policy_horizon/
+│       ├── __init__.py
+│       ├── compat.py
+│       ├── configuration_horizon_dit.py
+│       ├── modeling_horizon_dit.py
+│       ├── processor_horizon_dit.py
+│       ├── backbones/
+│       ├── future_sources/
+│       ├── models/
+│       └── utils/
+└── tests/
 ```
+
+## Public Components Reused
+
+Datasets:
+
+- `lerobot/libero_spatial_image`
+- `lerobot/libero_object_image`
+- `lerobot/libero_goal_image`
+- `lerobot/libero_10_image`
+- `lerobot/libero_90_image`
+
+Training loop:
+
+- `lerobot-train`
+
+Task metadata / suite definitions:
+
+- official LIBERO benchmark classes when `libero` is installed
 
 ## Quickstart
 
+Create the environment on an AWS box:
+
 ```bash
-python -m pip install -e .
-python scripts/train_oracle_future.py --max-steps 10
-python scripts/train_mixed_future.py --max-steps 10
-python scripts/extract_debug_batch.py
-pytest
+bash scripts/aws_bootstrap.sh
+source .venv/bin/activate
 ```
 
-By default the scripts use a synthetic LIBERO-like dataset and a lightweight visual feature extractor so the full path is runnable without Cosmos.
+Print the exact LeRobot launch command:
 
-## Real Cosmos Integration
+```bash
+python3 scripts/train_horizon_libero.py --dry-run
+```
 
-`CosmosAdapter` already defines the boundary that the rest of the repo uses:
+Launch training:
 
-- `encode_current_frames(...)`
-- `encode_future_frames(...)`
-- `maybe_generate_future_features(...)`
-- `maybe_extract_intermediate_features(...)`
+```bash
+python3 scripts/train_horizon_libero.py
+```
 
-To attach real Cosmos Predict2 later, implement those methods with the external runtime and keep the output shape contract unchanged.
+Pass additional LeRobot overrides after `--`:
 
-## Training Stages
+```bash
+python3 scripts/train_horizon_libero.py -- \
+  --steps=200000 \
+  --wandb.enable=true
+```
 
-1. Stage 1: train with `oracle_clean` and `oracle_noised`.
-2. Stage 2: mix `current_only`, `oracle_clean`, and `oracle_noised`.
-3. Stage 3: connect frozen Cosmos generation in `generated_future.py`.
-4. Stage 4: compare clean, noised, generated, and intermediate denoiser-state features.
+## Interactive AWS Test
+
+For an interactive GPU session, the practical sequence is:
+
+1. get a shell inside the AWS pod
+2. clone or copy `horizon`
+3. install `horizon` editable
+4. install the full Cosmos fork environment from `cosmos-predict2/scripts/libero.md`
+5. run the diagnostic script before attempting training
+
+Inside the pod:
+
+```bash
+cd /workspace
+git clone <your-horizon-repo-url> horizon
+cd horizon
+python -m pip install -e .
+python -m pip install "lerobot[libero]"
+```
+
+For real Cosmos runtime support, `aws_bootstrap.sh` is not enough. You also need the Cosmos fork dependencies:
+
+```bash
+cd /workspace/horizon/cosmos-predict2
+python -m pip install uv
+uv sync --extra cu126
+source .venv/bin/activate
+cd /workspace/horizon
+python -m pip install -e .
+python -m pip install "lerobot[libero]"
+```
+
+Download the base Cosmos checkpoint:
+
+```bash
+cd /workspace/horizon/cosmos-predict2
+python scripts/download_checkpoints.py --model_types video2world --model_sizes 2B --resolution 480 --fps 10
+```
+
+If you also want the LIBERO LoRA weights, point the diagnostic and config at the checkpoint directory or file later with `--cosmos-lora-checkpoint`.
+
+Run the diagnostic:
+
+```bash
+cd /workspace/horizon
+python scripts/test_horizon_stack.py
+```
+
+If you only want to verify the Horizon side first and skip real Cosmos initialization:
+
+```bash
+python scripts/test_horizon_stack.py --skip-real-cosmos
+```
+
+## Test Output
+
+The diagnostic script prints `PASS`, `WARN`, and `FAIL` lines.
+
+Typical early bring-up output:
+
+- `PASS repo_root`, `PASS cosmos_repo`, `PASS system`: repo and GPU are visible
+- `PASS launcher_dry_run`: the LeRobot launch command is well-formed
+- `PASS fallback_adapter`: the local non-Cosmos path works
+- `PASS policy_forward`: the Horizon policy can run a synthetic forward pass
+- `WARN import:omegaconf`, `WARN import:hydra`, `WARN import:peft`, etc.: Cosmos dependencies are still missing
+- `WARN real_cosmos_adapter: runtime did not initialize ...`: expected until the Cosmos fork env is installed correctly
+
+What you want before trying real training:
+
+- `PASS import:cosmos_predict2`
+- no critical Cosmos dependency warnings
+- `PASS real_cosmos_encode`
+- `PASS real_cosmos_denoise`
+- `PASS policy_forward`
+
+If the script ends with `FAIL`, do not start training yet. Fix the failing dependency or runtime issue first.
+
+## Config
+
+Default config:
+
+- [libero_horizon_oracle_hidden.yaml](/media/eandre/PortableSSD/ETHRC/horizon/configs/train/libero_horizon_oracle_hidden.yaml)
+
+Important fields:
+
+- `train.suite`: LIBERO suite mapped to a public LeRobot dataset repo
+- `policy.future_source`: `oracle_clean`, `oracle_noised`, `oracle_hidden`, `mixed`, ...
+- `policy.cosmos_hidden_layer`
+- `policy.cosmos_noise_level`
+- `policy.cosmos_tau`
+- `policy.cosmos_repo_path`
+- `policy.cosmos_model_size`
+- `policy.cosmos_resolution`
+- `policy.cosmos_fps`
+- `policy.cosmos_lora_checkpoint`
+- `policy.current_obs_steps`
+- `policy.future_obs_steps`
+- `policy.future_offset`
+
+The observation delta indices are derived automatically from:
+
+- current observation steps
+- future observation steps
+- future offset
+
+So the LeRobot dataset loader can provide both current and oracle-future frames without a custom dataset implementation.
+
+## Cosmos Adapter
+
+The adapter in [cosmos_adapter.py](/media/eandre/PortableSSD/ETHRC/horizon/src/lerobot_policy_horizon/backbones/cosmos_adapter.py) now has two paths:
+
+- real runtime path for the local `cosmos-predict2` `libero` branch
+- lightweight fallback path so the repo still shape-tests without Cosmos dependencies
+
+The real path follows your fork’s LIBERO notes in `cosmos-predict2/scripts/libero.md`:
+
+- model family: `Cosmos-Predict2-2B-Video2World`
+- checkpoint variant: `480p`, `10fps`
+- optional LoRA injection from the LIBERO fine-tune checkpoint
+
+The adapter exposes:
+
+- `encode(...)`: tokenizer latent features, pooled over space and projected to Horizon feature dim
+- `denoise_to_tau(...)`: noise latent features to a sigma derived from `tau`, run the real Cosmos DiT, and capture per-block hidden states
+- `get_nth_hidden_layer(...)`: select the requested hidden layer after projection to Horizon feature dim
+
+If the Cosmos runtime cannot be imported, Horizon falls back to the local lightweight encoder and emits a warning instead of breaking import-time tests.
 
 ## Notes
 
-- The current ActionDiT is compact and robotics-specific. It is DiT-inspired but not a copy of the original image-latent training code.
-- Flow matching is used instead of DDPM training.
-- Current and future frames share the same visual encoder path.
-
-## Next Engineering Steps
-
-1. Replace the mock visual extractor inside `CosmosAdapter` with real Cosmos feature extraction while preserving `Tensor[B, T, D_vis]` outputs.
-2. Freeze the external Cosmos backbone and validate feature parity between `encode_current_frames` and `encode_future_frames`.
-3. Implement `maybe_generate_future_features(...)` so it returns stochastic generated future features online, not a single cached bank.
-4. Add `GeneratedFutureSource` to `mixed_future.py` with configurable per-sample mixing probabilities.
-5. Add optional multi-sample generated futures per training sample and either pool or randomly choose one conditioning instance.
-6. Add intermediate denoiser-state extraction in `maybe_extract_intermediate_features(...)` and expose it as another future-source mode for ablations.
+- This repo does not vendor Cosmos.
+- This repo does not vendor LIBERO datasets.
+- This repo does not replace the LeRobot train loop.
+- `generated` future conditioning is still a TODO because it requires a real frozen Cosmos rollout path.

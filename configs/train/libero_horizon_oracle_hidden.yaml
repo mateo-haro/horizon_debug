@@ -1,0 +1,53 @@
+train:
+  suite: libero_spatial
+  dataset_flavor: image
+  dataset_repo_id: null
+  output_dir: outputs/train/libero_spatial_horizon_dit
+  job_name: libero_spatial_horizon_dit
+  train_entrypoint: lerobot-train
+  wandb_enable: false
+  extra_args: []
+
+policy:
+  type: horizon_dit
+  device: cuda
+  repo_id: null
+  current_obs_steps: 2
+  future_obs_steps: 2
+  future_offset: 4
+  chunk_size: 8
+  n_action_steps: 8
+  future_source: oracle_hidden
+  source_mix:
+    current_only: 0.2
+    oracle_clean: 0.3
+    oracle_noised: 0.2
+    oracle_hidden: 0.3
+  vis_feature_dim: 256
+  model_dim: 512
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  text_vocab_size: 4096
+  max_text_tokens: 16
+  flow_matching_steps: 16
+  cosmos_feature_dim: 256
+  cosmos_num_hidden_layers: 8
+  cosmos_hidden_layer: 3
+  cosmos_noise_level: 0.15
+  cosmos_tau: 0.5
+  cosmos_use_external_runtime: true
+  cosmos_external_module: null
+  cosmos_repo_path: cosmos-predict2
+  cosmos_model_size: 2B
+  cosmos_resolution: "480"
+  cosmos_fps: 10
+  cosmos_lora_checkpoint: null
+  cosmos_lora_rank: 16
+  cosmos_lora_alpha: 16
+  cosmos_lora_target_modules: q_proj,k_proj,v_proj,output_proj,mlp.layer1,mlp.layer2
+  cosmos_prompt_refiner_enabled: false
+  cosmos_guardrail_enabled: false
+  use_proprio: true
+  use_task_text: true
