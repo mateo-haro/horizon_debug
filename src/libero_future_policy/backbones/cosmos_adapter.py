@@ -31,16 +31,18 @@ class CosmosAdapterConfig:
     image_channels: int = 3
     cosmos_block_index: int = 0
     cosmos_model_size: str = "2B"
-    cosmos_resolution: str = "720"
+    cosmos_resolution: str = "480"
     cosmos_fps: int = 16
-    cosmos_aspect_ratio: str = "16:9"
+    cosmos_aspect_ratio: str = "1:1"
     cosmos_natten: bool = False
     cosmos_dit_path: str | None = None
     cosmos_checkpoints_root: str | None = None
     cosmos_auto_fetch_checkpoints: bool = True
     cosmos_default_prompt: str = ""
-    cosmos_num_conditional_frames: int = 1
-    cosmos_intermediate_pool: str = "mean"
+    cosmos_num_conditional_frames: int = 5
+    # Video2World denoise: "frame_replace" injects clean latents for the first N conditional frames; see ConditioningStrategy.
+    cosmos_conditioning_strategy: str = "frame_replace"
+    cosmos_intermediate_pool: str = "none"
     # T5-11b on GPU during pipeline init often causes OOM (host kills process, exit 137); offload keeps it on CPU until encode_prompt.
     cosmos_offload_text_encoder: bool = True
     cosmos_downcast_text_encoder: bool = True
@@ -319,6 +321,7 @@ class CosmosAdapter(nn.Module):
             cfg,
             guardrail_config=attrs.evolve(cfg.guardrail_config, enabled=False),
             prompt_refiner_config=attrs.evolve(cfg.prompt_refiner_config, enabled=False),
+            conditioning_strategy=self.config.cosmos_conditioning_strategy,
         )
         dit_path = self.config.cosmos_dit_path or get_cosmos_predict2_video2world_checkpoint(
             model_size=self.config.cosmos_model_size,
@@ -499,14 +502,21 @@ class CosmosAdapter(nn.Module):
         denoise_level: float | None = None,
         *,
         prompt: str | None = None,
-    ) -> torch.Tensor | None:
+        return_metadata: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]] | None:
         """Run one Video2World denoise step and return activations after DiT block k.
 
         Requires CUDA, ``use_external_cosmos=True``, and a successful Cosmos pipeline load.
         ``frames`` is ``[B, C, T, H, W]`` (dataset range ``[0,1]`` or ``[-1,1]`` float, or uint8).
 
         Returns:
-            If ``cosmos_intermediate_pool`` is ``\"mean\"``: ``[B, feature_dim]`` (projected if needed).
+            If ``return_metadata`` is False: same as before — tensor or ``None``.
+            If ``return_metadata`` is True: ``(tensor, meta)`` or ``None``. ``meta`` includes
+            ``prompt`` (str), ``denoise_level`` (``float | None``, argument passed in), and
+            ``sigma_b`` (``torch.Tensor`` on CPU, shape ``[B]``, effective noise scale per batch item
+            after ``_sample_sigma_bt``, including ``adjust_video_noise`` scaling).
+
+            If ``cosmos_intermediate_pool`` is ``\"mean\"``: feature tensor is ``[B, feature_dim]`` (projected if needed).
             If ``\"none\"``: ``[B, T', H', W', D]`` patch-grid tensor after block k.
             ``None`` when Cosmos is unavailable or inputs are not on CUDA.
         """
@@ -525,6 +535,7 @@ class CosmosAdapter(nn.Module):
         text_prompt = self.config.cosmos_default_prompt if prompt is None else prompt
 
         captured: list[torch.Tensor] = []
+        sigma_bt_used: torch.Tensor | None = None
 
         def _hook(_module: nn.Module, _inp: Any, out: torch.Tensor) -> None:
             captured.append(out.detach())
@@ -540,6 +551,7 @@ class CosmosAdapter(nn.Module):
                 _cosmos_load_log(self.config, f"maybe_extract_intermediate_features: denoise | {_cuda_mem_line()}")
                 b = x0.shape[0]
                 sigma_bt = self._sample_sigma_bt(b, x0.device, denoise_level)
+                sigma_bt_used = sigma_bt
                 epsilon = torch.randn_like(x0)
                 xt = x0 + epsilon * rearrange(sigma_bt.to(dtype=x0.dtype), "b t -> b 1 t 1 1")
                 pipe.denoise(xt, sigma_bt.to(dtype=x0.dtype), condition, use_cuda_graphs=False)
@@ -547,21 +559,33 @@ class CosmosAdapter(nn.Module):
         finally:
             hook_handle.remove()
 
-        if not captured:
+        if not captured or sigma_bt_used is None:
             return None
         h_out = captured[-1]
         pool = self.config.cosmos_intermediate_pool
         if pool == "none":
-            return h_out
-        if pool != "mean":
+            feats = h_out
+        elif pool == "mean":
+            pooled = h_out.mean(dim=(1, 2, 3))
+            if self.cosmos_intermediate_proj is not None:
+                w = self.cosmos_intermediate_proj.weight
+                if pooled.dtype != w.dtype:
+                    pooled = pooled.to(dtype=w.dtype)
+                feats = self.cosmos_intermediate_proj(pooled)
+            else:
+                feats = pooled
+        else:
             raise ValueError(f"Unknown cosmos_intermediate_pool {pool!r}, expected 'mean' or 'none'")
-        pooled = h_out.mean(dim=(1, 2, 3))
-        if self.cosmos_intermediate_proj is not None:
-            w = self.cosmos_intermediate_proj.weight
-            if pooled.dtype != w.dtype:
-                pooled = pooled.to(dtype=w.dtype)
-            return self.cosmos_intermediate_proj(pooled)
-        return pooled
+
+        if return_metadata:
+            sigma_b_cpu = sigma_bt_used.squeeze(-1).detach().cpu().float()
+            meta: dict[str, Any] = {
+                "prompt": text_prompt,
+                "denoise_level": denoise_level,
+                "sigma_b": sigma_b_cpu,
+            }
+            return feats, meta
+        return feats
 
     def empty_future_features(
         self,
