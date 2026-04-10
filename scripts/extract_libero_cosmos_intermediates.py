@@ -1,48 +1,9 @@
-"""Extract Cosmos DiT intermediate features over sliding windows on LIBERO Cosmos MP4 data.
+"""Sliding-window LIBERO Cosmos MP4 → CosmosAdapter intermediate features (one forward per window).
 
-Expects the VideoDataset layout from ``cosmos-predict2/scripts/prepare_libero_cosmos_dataset.py``::
+Expects ``<dataset-root>/videos/*.mp4`` and optional ``metas/*.txt``. Full argument reference, noise
+filename encoding, and examples: ``src/libero_future_policy/backbones/README.md``.
 
-    <dataset-root>/
-        videos/<episode>.mp4
-        metas/<episode>.txt   # task caption (optional; fallback prompt if missing)
-
-Defaults match ``cosmos-predict2/scripts/eval_libero_cosmos.py`` (480p, 10 fps, 1:1, 5 conditional
-frames, 2B). Temporal window defaults to **93** frames (Libero Cosmos / Video2World training length).
-
-**Frame indices** are **0-based**. For an episode with ``T`` frames and window length ``W``, windows
-are ``[start, start+W)`` for ``start = 0 … T - W`` (inclusive start, exclusive end). If ``T < W``,
-the episode is skipped with a warning.
-
-**Noise** (``--noise-mode``):
-
-- ``fixed``: pass ``--denoise-level`` in ``[0, 1]`` to the adapter every window.
-- ``scheduler``: random ``sigma`` from the training scheduler each window (``denoise_level=None``).
-- ``uniform``: sample ``denoise_level`` uniformly in ``[--denoise-min, --denoise-max]`` per window.
-
-Each window is saved under
-``--out-dir/<episode_stem>/window_<start>_<end>_<noise_tag>.pt`` (end exclusive). ``noise_tag`` is
-``dl`` + denoise level (e.g. ``dl0p500000``) when a level was passed, or ``sg`` + effective ``sigma``
-when the scheduler sampled noise (``denoise_level`` is ``None``). Payload includes the same fields as before.
-
-Run from repo root (requires CUDA, cosmos-predict2, checkpoints)::
-
-    python scripts/extract_libero_cosmos_intermediates.py \\
-        --dataset-root datasets/libero_cosmos_mp4/val \\
-        --out-dir outputs/cosmos_intermediates \\
-        --scope all
-
-Single episode (``--dataset-root`` is the split directory containing ``videos/`` and ``metas/``;
-``--episode-stem`` is the MP4 filename **without** ``.mp4``)::
-
-    # Episode file:
-    #   /data/cosmos-predict2/datasets/libero_cosmos_mp4/train/videos/episode_data--suite=libero_spatial--2025_08_03-18_55_42--task=9--ep=500--success=True--regen_demo.mp4
-    python scripts/extract_libero_cosmos_intermediates.py \\
-        --dataset-root /data/cosmos-predict2/datasets/libero_cosmos_mp4/train \\
-        --out-dir outputs/cosmos_intermediates \\
-        --scope episode \\
-        --episode-stem 'episode_data--suite=libero_spatial--2025_08_03-18_55_42--task=9--ep=500--success=True--regen_demo'
-
-Environment: ``TOKENIZERS_PARALLELISM=false`` is set to avoid Hugging Face tokenizer warnings.
+Requires CUDA, cosmos-predict2, and checkpoints. Sets ``TOKENIZERS_PARALLELISM=false``.
 """
 from __future__ import annotations
 

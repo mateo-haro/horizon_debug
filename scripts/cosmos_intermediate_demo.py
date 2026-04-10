@@ -1,5 +1,7 @@
 """Manual demo: dummy video -> CosmosAdapter -> intermediate DiT features after block k.
 
+Full CLI reference and examples: ``src/libero_future_policy/backbones/README.md``.
+
 Prerequisites (otherwise the script skips or exits non-zero with --require-success):
 
 - NVIDIA GPU with CUDA available

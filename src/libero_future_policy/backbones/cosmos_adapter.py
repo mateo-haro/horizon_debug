@@ -1,3 +1,5 @@
+"""Cosmos Predict2 Video2World integration. Config, scripts, and examples: see ``README.md`` in this directory."""
+
 from __future__ import annotations
 
 import glob
