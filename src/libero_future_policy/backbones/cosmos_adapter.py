@@ -252,7 +252,8 @@ class CosmosAdapter(nn.Module):
             if self._cosmos_pipe is not None:
                 d_model = int(self._cosmos_pipe.dit.model_channels)
                 if d_model != config.feature_dim:
-                    self.cosmos_intermediate_proj = nn.Linear(d_model, config.feature_dim)
+                    dit_dev = next(self._cosmos_pipe.dit.parameters()).device
+                    self.cosmos_intermediate_proj = nn.Linear(d_model, config.feature_dim).to(device=dit_dev)
 
         if config.freeze_backbone:
             for parameter in self.encoder.parameters():
