@@ -252,8 +252,10 @@ class CosmosAdapter(nn.Module):
             if self._cosmos_pipe is not None:
                 d_model = int(self._cosmos_pipe.dit.model_channels)
                 if d_model != config.feature_dim:
-                    dit_dev = next(self._cosmos_pipe.dit.parameters()).device
-                    self.cosmos_intermediate_proj = nn.Linear(d_model, config.feature_dim).to(device=dit_dev)
+                    _p0 = next(self._cosmos_pipe.dit.parameters())
+                    self.cosmos_intermediate_proj = nn.Linear(d_model, config.feature_dim).to(
+                        device=_p0.device, dtype=_p0.dtype
+                    )
 
         if config.freeze_backbone:
             for parameter in self.encoder.parameters():
@@ -555,6 +557,9 @@ class CosmosAdapter(nn.Module):
             raise ValueError(f"Unknown cosmos_intermediate_pool {pool!r}, expected 'mean' or 'none'")
         pooled = h_out.mean(dim=(1, 2, 3))
         if self.cosmos_intermediate_proj is not None:
+            w = self.cosmos_intermediate_proj.weight
+            if pooled.dtype != w.dtype:
+                pooled = pooled.to(dtype=w.dtype)
             return self.cosmos_intermediate_proj(pooled)
         return pooled
 
