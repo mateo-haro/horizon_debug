@@ -1,0 +1,3 @@
+[submodule "cosmos-predict2"]
+	path = cosmos-predict2
+	url = git@github.com:ETHRoboticsClub/cosmos-predict2.git
