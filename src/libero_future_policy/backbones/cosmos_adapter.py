@@ -451,6 +451,14 @@ class CosmosAdapter(nn.Module):
         effective = prompt if prompt else self.config.cosmos_default_prompt
         prompts = [effective] * b
         _cosmos_load_log(self.config, f"encode_prompt (T5) start | {_cuda_mem_line()}")
+        # CPU-offloaded T5: Video2WorldPipeline.encode_prompt moves weights to CUDA, but
+        # CosmosT5TextEncoder.encode_prompts still does .to(self.device) with the init-time
+        # "cpu" string. Sync the string so token ids land on CUDA (no cosmos-predict2 patch).
+        te = pipe.text_encoder
+        if te is not None and hasattr(te, "device"):
+            target = str(pipe.tensor_kwargs.get("device", "cuda"))
+            if isinstance(te.device, str) and any(p.device.type == "cpu" for p in te.parameters()):
+                te.device = target
         emb = pipe.encode_prompt(prompts).to(dtype=pipe.torch_dtype)
         _cosmos_load_log(self.config, f"encode_prompt (T5) done | {_cuda_mem_line()}")
         data_batch: dict[str, Any] = {
