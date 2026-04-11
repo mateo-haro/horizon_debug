@@ -725,6 +725,46 @@ class _CosmosPredict2Runtime:
     def feature_num_frames(self, num_pixel_frames: int) -> int:
         return int(self.pipe.tokenizer.get_latent_num_frames(int(num_pixel_frames)))
 
+    def _min_latent_frames_for_dit(self) -> int:
+        """DiT uses 3D convs with temporal kernel 3; latents with T<3 raise in ``pipe.denoise``."""
+        return 3
+
+    def _pad_pixel_frames_for_min_latent(self, frames: torch.Tensor) -> tuple[torch.Tensor, int]:
+        """Repeat the last frame so tokenizer latent length meets DiT minimum temporal extent."""
+        expect_rank(frames, 5, "frames")
+        _b, _c, t_orig, _h, _w = frames.shape
+        tok = self.pipe.tokenizer
+        min_latent = self._min_latent_frames_for_dit()
+        t_target = int(t_orig)
+        while t_target < 2048 and int(tok.get_latent_num_frames(t_target)) < min_latent:
+            t_target += 1
+        if int(tok.get_latent_num_frames(t_target)) < min_latent:
+            raise RuntimeError(
+                f"Could not pad temporal length: pixel T={t_orig}..{t_target}, "
+                f"need at least {min_latent} latent frames for DiT."
+            )
+        if t_target == t_orig:
+            return frames, t_orig
+        pad = t_target - t_orig
+        last = frames[:, :, -1:, :, :].expand(-1, -1, pad, -1, -1)
+        return torch.cat([frames, last], dim=2), t_orig
+
+    @staticmethod
+    def _slice_temporal_to_latent_tokens(
+        tensor_3d: torch.Tensor,
+        latent_time_full: int,
+        latent_time_keep: int,
+    ) -> torch.Tensor:
+        """Pick the time axis matching ``latent_time_full`` and keep the first ``latent_time_keep`` steps."""
+        if tensor_3d.dim() != 3:
+            return tensor_3d
+        for d in range(3):
+            if int(tensor_3d.shape[d]) == latent_time_full:
+                idx: list[slice | int] = [slice(None)] * 3
+                idx[d] = slice(0, latent_time_keep)
+                return tensor_3d[tuple(idx)].contiguous()
+        return tensor_3d[:, :latent_time_keep, :].contiguous()
+
     def _prepare_video(self, frames: torch.Tensor) -> torch.Tensor:
         expect_rank(frames, 5, "frames")
         video = frames.to(device=self.device)
@@ -815,7 +855,11 @@ class _CosmosPredict2Runtime:
         noise_level: float,
         texts: list[str] | None = None,
     ) -> _PolicyCosmosRuntimeDenoiseOutput:
-        encoded = self.encode_tokens(frames)
+        frames_in, t_pixel_orig = self._pad_pixel_frames_for_min_latent(frames)
+        latent_time_keep = self.feature_num_frames(t_pixel_orig)
+
+        encoded = self.encode_tokens(frames_in)
+        latent_time_full = int(encoded.latent.shape[2])
         sigma = self._sigma_from_tau(tau=tau, noise_level=noise_level)
         condition = self._build_condition(encoded.latent, texts)
 
@@ -823,8 +867,15 @@ class _CosmosPredict2Runtime:
         xt_latent = encoded.latent + noise
         hidden_tokens = self._capture_hidden_tokens(xt_latent=xt_latent, sigma=sigma, condition=condition)
 
+        enc_tok = encoded.tokens.float()
+        enc_tok = self._slice_temporal_to_latent_tokens(enc_tok, latent_time_full, latent_time_keep)
+        hidden_tokens = [
+            self._slice_temporal_to_latent_tokens(h.float(), latent_time_full, latent_time_keep)
+            for h in hidden_tokens
+        ]
+
         return _PolicyCosmosRuntimeDenoiseOutput(
-            encoded_tokens=encoded.tokens.float(),
+            encoded_tokens=enc_tok,
             hidden_tokens=hidden_tokens,
             sigma=sigma,
         )

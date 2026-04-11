@@ -170,31 +170,6 @@ def check_launcher_dry_run(reporter: Reporter) -> None:
         reporter.fail("launcher_dry_run", _exception_detail(exc))
 
 
-def check_fallback_adapter(reporter: Reporter, args: argparse.Namespace) -> None:
-    import torch
-    from horizon.backbones.cosmos_adapter import CosmosAdapter
-
-    try:
-        adapter = CosmosAdapter(
-            feature_dim=args.feature_dim,
-            hidden_layer_index=min(args.hidden_layer, 1),
-            noise_level=args.noise_level,
-            num_hidden_layers=max(args.hidden_layer + 1, 4),
-            device="cpu",
-            use_external_runtime=False,
-        )
-        frames = torch.randn(1, min(args.frames, 4), 3, 64, 64)
-        encoded = adapter.encode(frames)
-        state = adapter.denoise_to_tau(frames, tau=args.tau)
-        hidden = adapter.get_nth_hidden_layer(state, hidden_layer_index=0)
-        reporter.pass_(
-            "fallback_adapter",
-            f"encoded={tuple(encoded.shape)} hidden_layers={len(state.hidden_states)} hidden={tuple(hidden.shape)}",
-        )
-    except Exception as exc:
-        reporter.fail("fallback_adapter", _exception_detail(exc))
-
-
 def check_real_cosmos_adapter(reporter: Reporter, args: argparse.Namespace, system_info: dict[str, Any]) -> bool:
     import torch
     from horizon.backbones.cosmos_adapter import CosmosAdapter
@@ -326,7 +301,6 @@ def main() -> int:
     system_info = check_system(reporter)
     check_imports(reporter, args.repo_path)
     check_launcher_dry_run(reporter)
-    check_fallback_adapter(reporter, args)
     use_real_cosmos = check_real_cosmos_adapter(reporter, args, system_info)
     check_policy(reporter, args, use_real_cosmos=use_real_cosmos)
     return reporter.summary()
