@@ -55,14 +55,24 @@ def _exception_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _repo_on_path(repo_path: Path) -> None:
-    if repo_path.exists() and str(repo_path.resolve()) not in sys.path:
+def _repo_on_path(repo_path: Path | None) -> None:
+    if repo_path is None or not repo_path.exists():
+        return
+    if str(repo_path.resolve()) not in sys.path:
         sys.path.insert(0, str(repo_path.resolve()))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Diagnose Horizon + Cosmos + LeRobot stack on AWS.")
-    parser.add_argument("--repo-path", type=Path, default=ROOT / "cosmos-predict2")
+    parser.add_argument(
+        "--repo-path",
+        type=Path,
+        default=None,
+        help=(
+            "Root of the cosmos-predict2 *source* clone (contains the cosmos_predict2 package). "
+            "Optional if cosmos_predict2 is installed in the environment."
+        ),
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--feature-dim", type=int, default=64)
     parser.add_argument("--height", type=int, default=256)
@@ -144,25 +154,44 @@ def check_cosmos_checkpoints_layout(reporter: Reporter, checkpoints_root: Path |
         )
 
 
-def check_repo_layout(reporter: Reporter, repo_path: Path) -> None:
+def check_repo_layout(reporter: Reporter, repo_path: Path | None) -> None:
     if ROOT.exists():
         reporter.pass_("repo_root", str(ROOT))
     else:
         reporter.fail("repo_root", f"Missing repo root: {ROOT}")
 
-    if repo_path.exists():
+    if repo_path is not None and repo_path.exists():
         reporter.pass_("cosmos_repo", str(repo_path.resolve()))
+    elif repo_path is not None:
+        try:
+            __import__("cosmos_predict2")
+            reporter.warn(
+                "cosmos_repo",
+                f"Path does not exist ({repo_path}); using installed cosmos_predict2",
+            )
+        except Exception as exc:
+            reporter.fail("cosmos_repo", f"Missing Cosmos repo at {repo_path} and import failed: {exc}")
     else:
-        reporter.fail("cosmos_repo", f"Missing Cosmos repo at {repo_path}")
+        try:
+            __import__("cosmos_predict2")
+            reporter.pass_("cosmos_repo", "not set; using installed cosmos_predict2")
+        except Exception as exc:
+            reporter.fail(
+                "cosmos_repo",
+                f"No --repo-path and cosmos_predict2 not importable: {exc}",
+            )
 
-    libero_doc = repo_path / "scripts" / "libero.md"
-    if libero_doc.exists():
-        reporter.pass_("cosmos_libero_doc", str(libero_doc))
+    if repo_path is not None and repo_path.exists():
+        libero_doc = repo_path / "scripts" / "libero.md"
+        if libero_doc.exists():
+            reporter.pass_("cosmos_libero_doc", str(libero_doc))
+        else:
+            reporter.warn("cosmos_libero_doc", f"Missing {libero_doc}")
     else:
-        reporter.warn("cosmos_libero_doc", f"Missing {libero_doc}")
+        reporter.warn("cosmos_libero_doc", "Skipped (no local --repo-path with scripts/)")
 
 
-def check_imports(reporter: Reporter, repo_path: Path) -> None:
+def check_imports(reporter: Reporter, repo_path: Path | None) -> None:
     _repo_on_path(repo_path)
 
     modules = [
@@ -227,7 +256,7 @@ def check_real_cosmos_adapter(reporter: Reporter, args: argparse.Namespace, syst
             num_hidden_layers=max(args.hidden_layer + 1, 8),
             device=args.device,
             use_external_runtime=True,
-            repo_path=str(args.repo_path),
+            repo_path=str(args.repo_path) if args.repo_path is not None else None,
             model_size="2B",
             resolution="480",
             fps=10,
@@ -308,7 +337,7 @@ def check_policy(reporter: Reporter, args: argparse.Namespace, use_real_cosmos: 
             use_proprio=True,
             libero_suite=None,
             cosmos_use_external_runtime=use_real_cosmos,
-            cosmos_repo_path=str(args.repo_path),
+            cosmos_repo_path=str(args.repo_path) if args.repo_path is not None else None,
             cosmos_model_size="2B",
             cosmos_resolution="480",
             cosmos_fps=10,

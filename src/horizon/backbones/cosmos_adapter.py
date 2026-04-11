@@ -634,14 +634,25 @@ class _CosmosPredict2Runtime:
         prompt_refiner_enabled: bool,
         guardrail_enabled: bool,
     ) -> None:
-        repo_path = Path(repo_path).resolve()
-        if not repo_path.exists():
-            raise FileNotFoundError(f"Cosmos repo path does not exist: {repo_path}")
         if not torch.cuda.is_available() and device.startswith("cuda"):
             raise RuntimeError("Cosmos Predict2 runtime requires CUDA for practical use.")
 
-        if str(repo_path) not in sys.path:
-            sys.path.insert(0, str(repo_path))
+        if repo_path is not None:
+            repo_path = Path(repo_path).resolve()
+            if repo_path.exists():
+                if str(repo_path) not in sys.path:
+                    sys.path.insert(0, str(repo_path))
+        try:
+            import importlib
+
+            importlib.import_module("cosmos_predict2")
+        except ImportError as exc:
+            hint = (
+                " Install cosmos_predict2 (e.g. uv/pip) or pass an existing --repo-path to a checkout."
+            )
+            if repo_path is not None and not Path(repo_path).exists():
+                hint = f" Repo path does not exist: {repo_path}.{hint}"
+            raise FileNotFoundError(f"Cannot import cosmos_predict2.{hint}") from exc
 
         from cosmos_predict2.configs.base.config_video2world import get_cosmos_predict2_video2world_pipeline
         from cosmos_predict2.conditioner import DataType
@@ -1005,7 +1016,8 @@ class CosmosAdapter(nn.Module):
                 self.runtime = importlib.import_module(self.external_module)
                 return
 
-            runtime_repo_path = self.repo_path or str(self._default_repo_path())
+            # None / "" = rely on installed cosmos_predict2; do not force horizon's sibling clone path.
+            runtime_repo_path = self.repo_path if self.repo_path else None
             self.runtime = _CosmosPredict2Runtime(
                 repo_path=runtime_repo_path,
                 device=self.device_spec,
