@@ -74,6 +74,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-real-cosmos", action="store_true")
     parser.add_argument("--skip-policy", action="store_true")
     parser.add_argument("--cosmos-lora-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--checkpoints",
+        type=Path,
+        default=None,
+        help=(
+            "Absolute path to the Cosmos checkpoints *root* (directory that contains "
+            "`nvidia/Cosmos-Predict2-.../` and `google-t5/`). Sets COSMOS_CHECKPOINTS_DIR and "
+            "COSMOS_PREDICT2_ARGS so tokenizer/DiT resolve without relying on cwd. "
+            "Example: /data/cosmos-predict2/checkpoints"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -105,6 +116,32 @@ def check_system(reporter: Reporter) -> dict[str, Any]:
         reporter.warn("gpu_names", "CUDA is not available; real Cosmos runtime tests will be skipped or fail.")
 
     return info
+
+
+def apply_cosmos_checkpoints_root(checkpoints_root: Path) -> None:
+    """Must run before importing cosmos_predict2 / imaginaire checkpoint paths."""
+    root = checkpoints_root.expanduser().resolve()
+    os.environ["COSMOS_CHECKPOINTS_DIR"] = str(root)
+    from horizon.backbones.cosmos_adapter import _apply_cosmos_predict2_checkpoints_root
+
+    _apply_cosmos_predict2_checkpoints_root(root)
+
+
+def check_cosmos_checkpoints_layout(reporter: Reporter, checkpoints_root: Path | None) -> None:
+    if checkpoints_root is None:
+        return
+    root = checkpoints_root.expanduser().resolve()
+    if not root.is_dir():
+        reporter.warn("cosmos_checkpoints", f"Not a directory: {root}")
+        return
+    tok = root / "nvidia" / "Cosmos-Predict2-2B-Video2World" / "tokenizer" / "tokenizer.pth"
+    if tok.is_file():
+        reporter.pass_("cosmos_checkpoints", str(root))
+    else:
+        reporter.warn(
+            "cosmos_checkpoints",
+            f"No tokenizer at {tok} — DiT may still fail to load until weights match this layout.",
+        )
 
 
 def check_repo_layout(reporter: Reporter, repo_path: Path) -> None:
@@ -297,7 +334,10 @@ def main() -> int:
     reporter = Reporter()
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if args.checkpoints is not None:
+        apply_cosmos_checkpoints_root(args.checkpoints)
     check_repo_layout(reporter, args.repo_path)
+    check_cosmos_checkpoints_layout(reporter, args.checkpoints)
     system_info = check_system(reporter)
     check_imports(reporter, args.repo_path)
     check_launcher_dry_run(reporter)
