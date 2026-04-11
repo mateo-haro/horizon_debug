@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from horizon.libero import task_texts_from_indices
+from utils.libero import task_texts_from_indices
 
 
 def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:

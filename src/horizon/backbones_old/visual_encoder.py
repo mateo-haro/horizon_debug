@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from lerobot_policy_horizon.utils.shapes import expect_rank
+from horizon.utils.shapes import expect_rank
 
 
 class SimpleVisualEncoder(nn.Module):

@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from lerobot_policy_horizon.future_sources.base import FUTURE_SOURCE_IDS, FutureConditionOutput, FutureSource
+from horizon.future_sources.base import FUTURE_SOURCE_IDS, FutureConditionOutput, FutureSource
 
 
 def _extract_optional_texts(batch: dict[str, Any], batch_size: int) -> list[str] | None:

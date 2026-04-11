@@ -131,12 +131,12 @@ def check_imports(reporter: Reporter, repo_path: Path) -> None:
     modules = [
         "yaml",
         "torch",
-        "horizon.config",
-        "horizon.lerobot",
-        "lerobot_policy_horizon.configuration_horizon_dit",
-        "lerobot_policy_horizon.modeling_horizon_dit",
-        "lerobot_policy_horizon.backbones.cosmos_adapter",
-        "lerobot_policy_horizon.future_sources.sources",
+        "utils.config",
+        "utils.lerobot",
+        "horizon.configuration_horizon_dit",
+        "horizon.modeling_horizon_dit",
+        "horizon.backbones.cosmos_adapter",
+        "horizon.future_sources.sources",
         "lerobot",
         "libero",
         "omegaconf",
@@ -172,7 +172,7 @@ def check_launcher_dry_run(reporter: Reporter) -> None:
 
 def check_fallback_adapter(reporter: Reporter, args: argparse.Namespace) -> None:
     import torch
-    from lerobot_policy_horizon.backbones.cosmos_adapter import CosmosAdapter
+    from horizon.backbones.cosmos_adapter import CosmosAdapter
 
     try:
         adapter = CosmosAdapter(
@@ -197,7 +197,7 @@ def check_fallback_adapter(reporter: Reporter, args: argparse.Namespace) -> None
 
 def check_real_cosmos_adapter(reporter: Reporter, args: argparse.Namespace, system_info: dict[str, Any]) -> bool:
     import torch
-    from lerobot_policy_horizon.backbones.cosmos_adapter import CosmosAdapter
+    from horizon.backbones.cosmos_adapter import CosmosAdapter
 
     if args.skip_real_cosmos:
         reporter.warn("real_cosmos_adapter", "Skipped by flag.")
@@ -264,8 +264,8 @@ def check_real_cosmos_adapter(reporter: Reporter, args: argparse.Namespace, syst
 
 def check_policy(reporter: Reporter, args: argparse.Namespace, use_real_cosmos: bool) -> None:
     import torch
-    from lerobot_policy_horizon.configuration_horizon_dit import HorizonDiTConfig
-    from lerobot_policy_horizon.modeling_horizon_dit import HorizonDiTPolicy
+    from horizon.configuration_horizon_dit import HorizonDiTConfig
+    from horizon.modeling_horizon_dit import HorizonDiTPolicy
 
     if args.skip_policy:
         reporter.warn("policy", "Skipped by flag.")

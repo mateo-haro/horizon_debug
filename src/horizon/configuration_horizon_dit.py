@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lerobot_policy_horizon.compat import AdamWConfig, FeatureType, LRSchedulerConfig, PolicyFeature, PreTrainedConfig
+from horizon.compat import AdamWConfig, FeatureType, LRSchedulerConfig, PolicyFeature, PreTrainedConfig
 
 
 def _default_input_features() -> dict[str, PolicyFeature]:

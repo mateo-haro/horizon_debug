@@ -11,8 +11,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from lerobot_policy_horizon.backbones.visual_encoder import SimpleVisualEncoder
-from lerobot_policy_horizon.utils.shapes import expect_rank
+from horizon.backbones_old.visual_encoder import SimpleVisualEncoder
+from horizon.utils.shapes import expect_rank
 
 
 @dataclass

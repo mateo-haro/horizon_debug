@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from horizon.libero import dataset_repo_id_for_suite, discover_local_libero_root, task_texts_from_indices
+from utils.libero import dataset_repo_id_for_suite, discover_local_libero_root, task_texts_from_indices
 
 
 def test_dataset_repo_id_mapping() -> None:

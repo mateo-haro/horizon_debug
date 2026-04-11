@@ -7,9 +7,9 @@ from typing import Any
 import torch
 from torch import nn
 
-from lerobot_policy_horizon.future_sources.base import FUTURE_SOURCE_IDS
-from lerobot_policy_horizon.utils.masking import masked_mean
-from lerobot_policy_horizon.utils.shapes import expect_last_dim, expect_rank
+from horizon.future_sources.base import FUTURE_SOURCE_IDS
+from horizon.utils.masking import masked_mean
+from horizon.utils.shapes import expect_last_dim, expect_rank
 
 
 class SimpleTextEncoder(nn.Module):

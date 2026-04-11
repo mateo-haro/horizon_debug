@@ -12,8 +12,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from horizon.config import HorizonLaunchConfig, load_horizon_launch_config
-from horizon.lerobot import build_train_command
+from utils.config import HorizonLaunchConfig, load_horizon_launch_config
+from utils.lerobot import build_train_command
 
 
 def parse_args() -> argparse.Namespace:

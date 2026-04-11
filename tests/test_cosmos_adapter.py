@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from lerobot_policy_horizon.backbones.cosmos_adapter import CosmosAdapter
+from horizon.backbones.cosmos_adapter import CosmosAdapter
 
 
 def test_cosmos_adapter_encode_and_hidden_shapes() -> None:

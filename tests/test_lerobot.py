@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from horizon.config import HorizonLaunchConfig
-from horizon.lerobot import build_train_command
+from utils.config import HorizonLaunchConfig
+from utils.lerobot import build_train_command
 
 
 def test_build_train_command_defaults() -> None:

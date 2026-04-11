@@ -4,10 +4,10 @@ from typing import Any
 
 import torch
 
-from lerobot_policy_horizon.backbones.cosmos_adapter import CosmosAdapter
-from lerobot_policy_horizon.compat import PreTrainedPolicy
-from lerobot_policy_horizon.configuration_horizon_dit import HorizonDiTConfig
-from lerobot_policy_horizon.future_sources.sources import (
+from horizon.backbones.cosmos_adapter import CosmosAdapter
+from horizon.compat import PreTrainedPolicy
+from horizon.configuration_horizon_dit import HorizonDiTConfig
+from horizon.future_sources.sources import (
     CurrentOnlyFutureSource,
     GeneratedFutureSource,
     MixedFutureSource,
@@ -16,9 +16,9 @@ from lerobot_policy_horizon.future_sources.sources import (
     OracleNoisedConfig,
     OracleNoisedFutureSource,
 )
-from lerobot_policy_horizon.models.action_dit import ActionDiT, ActionDiTConfig
-from lerobot_policy_horizon.models.action_flow import ActionFlowMatcher
-from lerobot_policy_horizon.utils.batch import (
+from horizon.models.action_dit import ActionDiT, ActionDiTConfig
+from horizon.models.action_flow import ActionFlowMatcher
+from horizon.utils.batch import (
     get_action_chunk,
     get_image_sequences,
     get_state_sequence,

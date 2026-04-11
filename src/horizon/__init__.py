@@ -1,24 +1,11 @@
-"""Launch helpers for the HorizonDiT LeRobot policy package."""
+"""LeRobot custom policy package for HorizonDiT."""
 
-from horizon.config import HorizonLaunchConfig, load_horizon_launch_config
-from horizon.lerobot import build_train_command
-from horizon.libero import (
-    LIBERO_DATASET_FLAVORS,
-    LIBERO_SUITES,
-    dataset_repo_id_for_suite,
-    discover_local_libero_root,
-    suite_task_texts,
-    task_texts_from_indices,
-)
+from horizon.configuration_horizon_dit import HorizonDiTConfig
+from horizon.modeling_horizon_dit import HorizonDiTPolicy
+from horizon.processor_horizon_dit import make_horizon_dit_pre_post_processors
 
 __all__ = [
-    "HorizonLaunchConfig",
-    "LIBERO_DATASET_FLAVORS",
-    "LIBERO_SUITES",
-    "build_train_command",
-    "dataset_repo_id_for_suite",
-    "discover_local_libero_root",
-    "load_horizon_launch_config",
-    "suite_task_texts",
-    "task_texts_from_indices",
+    "HorizonDiTConfig",
+    "HorizonDiTPolicy",
+    "make_horizon_dit_pre_post_processors",
 ]

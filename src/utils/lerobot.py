@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from horizon.config import HorizonLaunchConfig
-from horizon.libero import dataset_repo_id_for_suite
+from utils.config import HorizonLaunchConfig
+from utils.libero import dataset_repo_id_for_suite
 
 
 def _extract_override_keys(args: list[str]) -> set[str]:

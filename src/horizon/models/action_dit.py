@@ -6,9 +6,9 @@ from typing import Any
 import torch
 from torch import nn
 
-from lerobot_policy_horizon.models.blocks import DiTBlock, FinalLayer, timestep_embedding
-from lerobot_policy_horizon.models.conditioning import ConditioningFusion
-from lerobot_policy_horizon.utils.shapes import expect_last_dim, expect_rank
+from horizon.models.blocks import DiTBlock, FinalLayer, timestep_embedding
+from horizon.models.conditioning import ConditioningFusion
+from horizon.utils.shapes import expect_last_dim, expect_rank
 
 
 @dataclass

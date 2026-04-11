@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from lerobot_policy_horizon.configuration_horizon_dit import HorizonDiTConfig
-from lerobot_policy_horizon.modeling_horizon_dit import HorizonDiTPolicy
+from horizon.configuration_horizon_dit import HorizonDiTConfig
+from horizon.modeling_horizon_dit import HorizonDiTPolicy
 
 
 def make_batch(batch_size: int = 2, total_obs_steps: int = 4, action_chunk: int = 8) -> dict[str, torch.Tensor | list[str]]:
