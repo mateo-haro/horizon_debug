@@ -729,10 +729,36 @@ class _CosmosPredict2Runtime:
         """DiT uses 3D convs with temporal kernel 3; latents with T<3 raise in ``pipe.denoise``."""
         return 3
 
+    @staticmethod
+    def _to_bcthw_for_temporal_pad(frames: torch.Tensor) -> tuple[torch.Tensor, str]:
+        """Normalize to ``B,C,T,H,W`` for time-axis padding; return layout tag to restore caller order.
+
+        Callers differ: some pass ``B,C,T,H,W``, others ``B,T,C,H,W`` (e.g. LeRobot / test scripts).
+        Padding the wrong axis turns RGB into a fake ``9``-channel tensor and breaks ``tokenizer.encode``.
+        """
+        expect_rank(frames, 5, "frames")
+        b, d1, d2 = frames.shape[0], frames.shape[1], frames.shape[2]
+        if d1 == 3 and d2 != 3:
+            return frames, "bcthw"
+        if d2 == 3 and d1 != 3:
+            return frames.permute(0, 2, 1, 3, 4).contiguous(), "btchw"
+        if d1 == 3 and d2 == 3:
+            # [B,3,3,H,W] only: assume time-before-channels (matches common batch layout).
+            return frames.permute(0, 2, 1, 3, 4).contiguous(), "btchw"
+        raise ValueError(
+            f"Cannot infer video layout for padding (expect RGB size 3 on dim 1 or 2): shape {tuple(frames.shape)}"
+        )
+
+    @staticmethod
+    def _restore_frame_layout(bcthw: torch.Tensor, layout: str) -> torch.Tensor:
+        if layout == "bcthw":
+            return bcthw
+        return bcthw.permute(0, 2, 1, 3, 4).contiguous()
+
     def _pad_pixel_frames_for_min_latent(self, frames: torch.Tensor) -> tuple[torch.Tensor, int]:
         """Repeat the last frame so tokenizer latent length meets DiT minimum temporal extent."""
-        expect_rank(frames, 5, "frames")
-        _b, _c, t_orig, _h, _w = frames.shape
+        bcthw, layout = self._to_bcthw_for_temporal_pad(frames)
+        _b, _c, t_orig, _h, _w = bcthw.shape
         tok = self.pipe.tokenizer
         min_latent = self._min_latent_frames_for_dit()
         t_target = int(t_orig)
@@ -744,10 +770,11 @@ class _CosmosPredict2Runtime:
                 f"need at least {min_latent} latent frames for DiT."
             )
         if t_target == t_orig:
-            return frames, t_orig
+            return self._restore_frame_layout(bcthw, layout), t_orig
         pad = t_target - t_orig
-        last = frames[:, :, -1:, :, :].expand(-1, -1, pad, -1, -1)
-        return torch.cat([frames, last], dim=2), t_orig
+        last = bcthw[:, :, -1:, :, :].expand(-1, -1, pad, -1, -1)
+        out = torch.cat([bcthw, last], dim=2)
+        return self._restore_frame_layout(out, layout), t_orig
 
     @staticmethod
     def _slice_temporal_to_latent_tokens(
