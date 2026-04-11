@@ -807,9 +807,21 @@ class _CosmosPredict2Runtime:
         video = video.clamp(-1.0, 1.0)
         return video.permute(0, 2, 1, 3, 4).contiguous()
 
-    def encode_tokens(self, frames: torch.Tensor) -> _PolicyCosmosEncodeOutput:
+    def _run_tokenizer_encode(self, frames: torch.Tensor) -> _PolicyCosmosEncodeOutput:
+        """VAE encode only (no temporal padding). Used after padding or when full latent length is needed for DiT."""
         video = self._prepare_video(frames)
         latent = self.pipe.encode(video)
+        tokens = latent.mean(dim=(-1, -2)).transpose(1, 2).contiguous()
+        return _PolicyCosmosEncodeOutput(latent=latent, tokens=tokens)
+
+    def encode_tokens(self, frames: torch.Tensor) -> _PolicyCosmosEncodeOutput:
+        """Encode pixels to latent tokens; pads time so tokenizer 3D convs see enough frames, then trims to logical length."""
+        frames_in, t_pixel_orig = self._pad_pixel_frames_for_min_latent(frames)
+        latent_keep = self.feature_num_frames(t_pixel_orig)
+        out = self._run_tokenizer_encode(frames_in)
+        t_full = int(out.latent.shape[2])
+        keep = min(latent_keep, t_full)
+        latent = out.latent[:, :, :keep, :, :]
         tokens = latent.mean(dim=(-1, -2)).transpose(1, 2).contiguous()
         return _PolicyCosmosEncodeOutput(latent=latent, tokens=tokens)
 
@@ -885,7 +897,7 @@ class _CosmosPredict2Runtime:
         frames_in, t_pixel_orig = self._pad_pixel_frames_for_min_latent(frames)
         latent_time_keep = self.feature_num_frames(t_pixel_orig)
 
-        encoded = self.encode_tokens(frames_in)
+        encoded = self._run_tokenizer_encode(frames_in)
         latent_time_full = int(encoded.latent.shape[2])
         sigma = self._sigma_from_tau(tau=tau, noise_level=noise_level)
         condition = self._build_condition(encoded.latent, texts)
