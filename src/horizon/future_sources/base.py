@@ -13,6 +13,7 @@ FUTURE_SOURCE_IDS = {
     "oracle_noised": 2,
     "oracle_hidden": 3,
     "generated": 4,
+    "precomputed": 5,
 }
 
 

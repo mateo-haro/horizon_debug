@@ -148,6 +148,43 @@ class GeneratedFutureSource(FutureSource):
         )
 
 
+class PrecomputedFutureSource(FutureSource):
+    """Future visual tokens loaded from the batch (e.g. offline Cosmos intermediates)."""
+
+    name = "precomputed"
+
+    def __init__(self, future_key: str = "horizon.precomputed_future_vis") -> None:
+        self.future_key = future_key
+
+    def get_future_condition(
+        self,
+        future_frame_views: list[torch.Tensor],
+        batch: dict[str, Any],
+        backbone: Any,
+        mode: str,
+    ) -> FutureConditionOutput:
+        del future_frame_views, backbone
+        if self.future_key not in batch:
+            raise KeyError(
+                f"future_source=precomputed requires batch key {self.future_key!r} with tensor "
+                f"[B, T, D_latent]."
+            )
+        future_vis = batch[self.future_key]
+        future_mask = torch.ones(future_vis.shape[:2], dtype=torch.bool, device=future_vis.device)
+        source_ids = torch.full(
+            (future_vis.shape[0],),
+            FUTURE_SOURCE_IDS[self.name],
+            dtype=torch.long,
+            device=future_vis.device,
+        )
+        return FutureConditionOutput(
+            future_vis=future_vis,
+            future_mask=future_mask,
+            future_source_id=source_ids,
+            metadata={},
+        )
+
+
 class MixedFutureSource(FutureSource):
     name = "mixed"
 

@@ -1,7 +1,15 @@
-"""Sliding-window LIBERO Cosmos MP4 → CosmosAdapter intermediate features (one forward per window).
+"""Sliding-window LIBERO Cosmos MP4 → CosmosVideoAdapter intermediate features.
 
-Expects ``<dataset-root>/videos/*.mp4`` and optional ``metas/*.txt``. Full argument reference, noise
-filename encoding, and examples: ``src/horizon/backbones/README.md`` (if present).
+Uses an extended timeline: ``num_conditional_frames`` copies of frame 0 before the episode,
+optional tail copies of the last frame so ``T < W`` episodes are not skipped, then sliding
+windows of length ``W``. Batched forwards per episode when ``--batch-size > 1``.
+
+Default ``--pool`` is ``none`` (raw DiT block grid). Use ``mean`` for a single global-pooled
+vector per window (DiT width, no adapter ``Linear``). Policy-side :class:`VisualLatentProjection`
+maps latents to ``cosmos_feature_dim``.
+
+Expects ``<dataset-root>/videos/*.mp4`` and optional ``metas/*.txt``. See
+``src/horizon/backbones/README.md`` for layout, filename grammar, and noise tags.
 
 Requires CUDA, cosmos-predict2, and checkpoints. Sets ``TOKENIZERS_PARALLELISM=false``.
 """
@@ -89,20 +97,82 @@ def _decord_batch_to_tensor(batch: np.ndarray | torch.Tensor, device: torch.devi
     return t.clamp(0.0, 1.0)
 
 
+def _virtual_to_decord_idx(virtual_i: int, n_prefix: int, n_video: int) -> int:
+    """Map extended-timeline index to decord frame index (``n_video`` = number of real frames)."""
+    if virtual_i < n_prefix:
+        return 0
+    if virtual_i < n_prefix + n_video:
+        return virtual_i - n_prefix
+    return n_video - 1
+
+
+def _extended_length(n_prefix: int, n_video: int, window_frames: int) -> tuple[int, int]:
+    """Return ``(L, suffix_pad)`` — extended length and count of tail synthetic frames."""
+    core = n_prefix + n_video
+    suffix_pad = max(0, window_frames - core)
+    return core + suffix_pad, suffix_pad
+
+
+def _window_decomposition(
+    virtual_start: int,
+    window_frames: int,
+    n_prefix: int,
+    n_video: int,
+) -> tuple[int, int, int, int]:
+    """``(head_pad, tail_pad, real_lo, real_hi_exclusive)`` for one window; ``(-1, -1)`` if no real."""
+    head = tail = 0
+    reals: list[int] = []
+    for j in range(window_frames):
+        pos = virtual_start + j
+        if pos < n_prefix:
+            head += 1
+        elif pos < n_prefix + n_video:
+            reals.append(pos - n_prefix)
+        else:
+            tail += 1
+    if not reals:
+        return head, tail, -1, -1
+    return head, tail, min(reals), max(reals) + 1
+
+
+def _window_basename(head: int, real_lo: int, real_hi: int, tail: int, noise_tag: str) -> str:
+    return f"window_h{head:03d}_r{real_lo}_{real_hi}_t{tail:03d}_{noise_tag}.pt"
+
+
 def _noise_tag_denoise_level(denoise_level: float) -> str:
     """Filesystem-safe tag for a fixed ``denoise_level`` in ``[0, 1]`` (must match adapter metadata)."""
     s = f"{float(denoise_level):.6f}".replace(".", "p").replace("-", "m")
     return f"dl{s}"
 
 
-def _noise_tag_from_meta(meta: dict) -> str:
-    """Tag from saved metadata: ``dl…`` when ``denoise_level`` is set, else ``sg…`` for ``sigma_b[0]``."""
+def _noise_tag_sigma(sigma: float) -> str:
+    s = f"{float(sigma):.6f}".replace(".", "p").replace("-", "m")
+    return f"sg{s}"
+
+
+def _noise_tag_from_meta(meta: dict, batch_index: int = 0) -> str:
+    """Tag from metadata after a forward (supports batched ``denoise_level`` tensor)."""
     dl = meta["denoise_level"]
+    if isinstance(dl, torch.Tensor):
+        flat = dl.reshape(-1)
+        if flat.numel() == 1:
+            return _noise_tag_denoise_level(float(flat[0].item()))
+        return _noise_tag_denoise_level(float(flat[batch_index].item()))
     if dl is not None:
         return _noise_tag_denoise_level(float(dl))
-    sig = float(meta["sigma_b"][0])
-    s = f"{sig:.6f}".replace(".", "p").replace("-", "m")
-    return f"sg{s}"
+    sb = meta["sigma_b"]
+    sig = float(sb[batch_index].item()) if sb.numel() > 1 else float(sb[0].item())
+    return _noise_tag_sigma(sig)
+
+
+def _payload_denoise_level(meta: dict, batch_index: int) -> float | None:
+    dl = meta["denoise_level"]
+    if isinstance(dl, torch.Tensor):
+        flat = dl.reshape(-1)
+        if flat.numel() == 1:
+            return float(flat[0].item())
+        return float(flat[batch_index].item())
+    return dl
 
 
 def _parse_args() -> argparse.Namespace:
@@ -120,6 +190,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--episode-stem", type=str, default=None, help="With --scope episode: exact episode name (no .mp4).")
     p.add_argument("--episode-glob", type=str, default=None, help="With --scope episode: fnmatch on stem.")
     p.add_argument("--window-frames", type=int, default=93, help="Temporal length W (default 93).")
+    p.add_argument("--batch-size", type=int, default=1, help="Windows per forward (same episode only; default 1).")
     p.add_argument("--noise-mode", choices=("fixed", "scheduler", "uniform"), default="fixed")
     p.add_argument("--denoise-level", type=float, default=0.5, help="For fixed mode: [0, 1].")
     p.add_argument("--denoise-min", type=float, default=0.0, help="For uniform mode.")
@@ -128,11 +199,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Skip a window if the expected output file already exists (exact path; fixed/uniform only before GPU).",
+        help="Skip windows whose output file exists; fixed/uniform skip whole batch if all exist.",
     )
     p.add_argument("--feature-dim", type=int, default=128)
     p.add_argument("--block", type=int, default=0, help="DiT block index k.")
-    p.add_argument("--pool", type=str, choices=("mean", "none"), default="mean")
+    p.add_argument(
+        "--pool",
+        type=str,
+        choices=("mean", "none"),
+        default="none",
+        help="none=raw DiT block grid (default); mean=global mean over spatiotemporal dims (DiT width, no adapter Linear).",
+    )
     p.add_argument("--dit-path", type=str, default=None)
     p.add_argument("--checkpoints-root", type=str, default=None)
     p.add_argument("--model-size", type=str, default="2B")
@@ -155,6 +232,8 @@ def main() -> None:
         raise SystemExit("--scope episode requires --episode-stem and/or --episode-glob")
     if args.noise_mode == "uniform" and args.denoise_min > args.denoise_max:
         raise SystemExit("--denoise-min must be <= --denoise-max")
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be >= 1")
 
     dataset_root = _check_dataset_root(args.dataset_root)
     out_root = args.out_dir.resolve()
@@ -206,8 +285,10 @@ def main() -> None:
 
     device = torch.device("cuda")
     W = args.window_frames
+    n_prefix = max(0, int(args.num_conditional_frames))
     rng = random.Random(args.seed)
     metas_dir = dataset_root / "metas"
+    batch_size = int(args.batch_size)
 
     for video_path in tqdm(episodes, desc="episodes"):
         stem = video_path.stem
@@ -215,70 +296,112 @@ def main() -> None:
         caption_path = metas_dir / f"{stem}.txt"
 
         vr = VideoReader(str(video_path), ctx=cpu(0))
-        n_frames = len(vr)
-        if n_frames < W:
-            print(f"skip {stem}: only {n_frames} frames (< window {W})", file=sys.stderr)
+        T = len(vr)
+        if T == 0:
+            print(f"skip {stem}: empty video", file=sys.stderr)
             continue
+
+        L, suffix_pad = _extended_length(n_prefix, T, W)
+        virtual_starts = list(range(0, L - W + 1))
 
         ep_dir = out_root / stem
         ep_dir.mkdir(parents=True, exist_ok=True)
 
-        for start in tqdm(
-            range(0, n_frames - W + 1),
+        notation_episode_prefix = f"-{n_prefix}..." if n_prefix > 0 else None
+        notation_episode_suffix = None
+        if suffix_pad > 0:
+            notation_episode_suffix = f"...{T - 1}+{suffix_pad}"
+
+        for chunk_i in tqdm(
+            range(0, len(virtual_starts), batch_size),
             desc=f"windows {stem}",
             leave=False,
         ):
-            end_excl = start + W
+            chunk_v = virtual_starts[chunk_i : chunk_i + batch_size]
+            B = len(chunk_v)
+            stats = [_window_decomposition(v, W, n_prefix, T) for v in chunk_v]
 
+            denoise_arg: float | None | torch.Tensor
             if args.noise_mode == "fixed":
-                denoise_level: float | None = float(args.denoise_level)
+                denoise_arg = float(args.denoise_level)
             elif args.noise_mode == "scheduler":
-                denoise_level = None
+                denoise_arg = None
             else:
-                denoise_level = rng.uniform(args.denoise_min, args.denoise_max)
+                levels = [rng.uniform(args.denoise_min, args.denoise_max) for _ in range(B)]
+                denoise_arg = torch.tensor(levels, device=device, dtype=torch.float32)
 
-            if args.skip_existing and args.noise_mode != "scheduler" and denoise_level is not None:
-                tag_pre = _noise_tag_denoise_level(float(denoise_level))
-                cand = ep_dir / f"window_{start:06d}_{end_excl:06d}_{tag_pre}.pt"
-                if cand.is_file():
+            if args.skip_existing and args.noise_mode != "scheduler":
+                candidate_paths: list[Path] = []
+                for j in range(B):
+                    head, tail, rl, rh = stats[j]
+                    if isinstance(denoise_arg, torch.Tensor):
+                        tag_pre = _noise_tag_denoise_level(float(denoise_arg[j].item()))
+                    else:
+                        assert denoise_arg is not None
+                        tag_pre = _noise_tag_denoise_level(float(denoise_arg))
+                    candidate_paths.append(ep_dir / _window_basename(head, rl, rh, tail, tag_pre))
+                if all(p.is_file() for p in candidate_paths):
                     continue
 
-            batch = vr.get_batch(list(range(start, start + W)))
-            frames = _decord_batch_to_tensor(batch, device)
+            frames_list: list[torch.Tensor] = []
+            for v in chunk_v:
+                decord_idxs = [_virtual_to_decord_idx(v + j, n_prefix, T) for j in range(W)]
+                batch = vr.get_batch(decord_idxs)
+                frames_list.append(_decord_batch_to_tensor(batch, device))
+            frames = torch.cat(frames_list, dim=0)
+
             result = adapter.maybe_extract_intermediate_features(
                 frames,
-                denoise_level=denoise_level,
+                denoise_level=denoise_arg,
                 prompt=prompt,
                 return_metadata=True,
             )
             if result is None:
-                print(f"warning: None features for {stem} window {start}-{end_excl}", file=sys.stderr)
+                print(f"warning: None features for {stem} batch starting v={chunk_v[0]}", file=sys.stderr)
                 continue
             feats, meta = result
 
-            noise_tag = _noise_tag_from_meta(meta)
-            out_path = ep_dir / f"window_{start:06d}_{end_excl:06d}_{noise_tag}.pt"
-            if args.skip_existing and args.noise_mode == "scheduler" and out_path.is_file():
-                continue
+            for j, v in enumerate(chunk_v):
+                head, tail, rl, rh = stats[j]
+                noise_tag = _noise_tag_from_meta(meta, j)
+                out_path = ep_dir / _window_basename(head, rl, rh, tail, noise_tag)
+                if args.skip_existing and args.noise_mode == "scheduler" and out_path.is_file():
+                    continue
 
-            payload = {
-                "features": feats.detach().cpu(),
-                "prompt": meta["prompt"],
-                "denoise_level": meta["denoise_level"],
-                "sigma_b": meta["sigma_b"],
-                "start_frame": start,
-                "end_frame": end_excl,
-                "episode_stem": stem,
-                "video_path": str(video_path.resolve()),
-                "caption_path": str(caption_path.resolve()) if caption_path.is_file() else None,
-                "noise_mode": args.noise_mode,
-                "window_frames": W,
-                "cosmos_intermediate_pool": args.pool,
-                "cosmos_block_index": args.block,
-                "noise_tag": noise_tag,
-                "output_filename": out_path.name,
-            }
-            torch.save(payload, out_path)
+                feat_j = feats[j].detach().cpu()
+                dl_one = _payload_denoise_level(meta, j)
+
+                payload = {
+                    "features": feat_j,
+                    "prompt": meta["prompt"],
+                    "denoise_level": dl_one,
+                    "sigma_b": meta["sigma_b"][j : j + 1].clone(),
+                    "virtual_start": v,
+                    "virtual_end_exclusive": v + W,
+                    "prefix_pad_episode": n_prefix,
+                    "suffix_pad_episode": suffix_pad,
+                    "video_num_frames": T,
+                    "num_conditional_frames": n_prefix,
+                    "window_head_pad": head,
+                    "window_tail_pad": tail,
+                    "real_start": rl,
+                    "real_end_exclusive": rh,
+                    "notation_episode_prefix": notation_episode_prefix,
+                    "notation_episode_suffix": notation_episode_suffix,
+                    "start_frame": v,
+                    "end_frame": v + W,
+                    "episode_stem": stem,
+                    "video_path": str(video_path.resolve()),
+                    "caption_path": str(caption_path.resolve()) if caption_path.is_file() else None,
+                    "noise_mode": args.noise_mode,
+                    "window_frames": W,
+                    "batch_size_effective": B,
+                    "cosmos_intermediate_pool": args.pool,
+                    "cosmos_block_index": args.block,
+                    "noise_tag": noise_tag,
+                    "output_filename": out_path.name,
+                }
+                torch.save(payload, out_path)
 
     print(f"Done. Outputs under {out_root}")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from horizon.configuration_horizon_dit import HorizonDiTConfig
 from horizon.modeling_horizon_dit import HorizonDiTPolicy
@@ -27,6 +29,8 @@ def test_policy_forward_runs() -> None:
         num_heads=4,
         vis_feature_dim=64,
         cosmos_feature_dim=64,
+        cosmos_encode_token_dim=64,
+        cosmos_hidden_token_dim=64,
         cosmos_num_hidden_layers=3,
         cosmos_hidden_layer=2,
         future_source="oracle_hidden",
@@ -36,6 +40,38 @@ def test_policy_forward_runs() -> None:
     )
     policy = HorizonDiTPolicy(config)
     batch = make_batch()
+    loss, info = policy.forward(batch)
+    assert loss.ndim == 0
+    assert "future_mask_frac" in info
+
+
+def test_policy_forward_precomputed_runs() -> None:
+    config = HorizonDiTConfig(
+        device="cpu",
+        current_obs_steps=2,
+        future_obs_steps=2,
+        chunk_size=8,
+        n_action_steps=4,
+        model_dim=128,
+        depth=2,
+        num_heads=4,
+        vis_feature_dim=64,
+        cosmos_feature_dim=64,
+        cosmos_encode_token_dim=64,
+        cosmos_hidden_token_dim=64,
+        use_precomputed_cosmos_latents=True,
+        future_source="precomputed",
+        use_task_text=True,
+        use_proprio=True,
+        libero_suite=None,
+    )
+    policy = HorizonDiTPolicy(config)
+    batch = {
+        "horizon.precomputed_curr_vis": torch.randn(2, 2, 64),
+        "horizon.precomputed_future_vis": torch.randn(2, 2, 64),
+        "action": torch.randn(2, 8, 7),
+        "task_text": ["a", "b"],
+    }
     loss, info = policy.forward(batch)
     assert loss.ndim == 0
     assert "future_mask_frac" in info
@@ -53,6 +89,8 @@ def test_policy_select_action_runs() -> None:
         num_heads=4,
         vis_feature_dim=64,
         cosmos_feature_dim=64,
+        cosmos_encode_token_dim=64,
+        cosmos_hidden_token_dim=64,
         cosmos_num_hidden_layers=3,
         cosmos_hidden_layer=2,
         future_source="mixed",

@@ -228,7 +228,6 @@ def _prepare_cosmos_checkpoints_directory(config: CosmosAdapterConfig) -> tuple[
 class CosmosVideoAdapter(nn.Module):
     """Video2World pipeline wrapper (``CosmosAdapterConfig``). For policy training, see ``CosmosAdapter``."""
 
-    cosmos_intermediate_proj: nn.Linear | None
     cosmos_pipeline_load_error: str | None
 
     def __init__(self, config: CosmosAdapterConfig) -> None:
@@ -242,27 +241,14 @@ class CosmosVideoAdapter(nn.Module):
             in_channels=config.image_channels,
             feature_dim=config.feature_dim,
         )
-        self.cosmos_intermediate_proj = None
 
         if config.use_external_cosmos:
             self.runtime = self._try_load_external_runtime(config.external_cosmos_module)
             self._load_cosmos_pipeline()
 
-        if self.cosmos_intermediate_proj is None and config.cosmos_intermediate_pool == "mean":
-            if self._cosmos_pipe is not None:
-                d_model = int(self._cosmos_pipe.dit.model_channels)
-                if d_model != config.feature_dim:
-                    _p0 = next(self._cosmos_pipe.dit.parameters())
-                    self.cosmos_intermediate_proj = nn.Linear(d_model, config.feature_dim).to(
-                        device=_p0.device, dtype=_p0.dtype
-                    )
-
         if config.freeze_backbone:
             for parameter in self.encoder.parameters():
                 parameter.requires_grad = False
-            if self.cosmos_intermediate_proj is not None:
-                for parameter in self.cosmos_intermediate_proj.parameters():
-                    parameter.requires_grad = False
             if self._cosmos_pipe is not None:
                 if self._cosmos_pipe.text_encoder is not None:
                     for parameter in self._cosmos_pipe.text_encoder.parameters():
@@ -477,12 +463,23 @@ class CosmosVideoAdapter(nn.Module):
         return data_batch
 
     def _sample_sigma_bt(
-        self, batch_size: int, device: torch.device, denoise_level: float | None
+        self,
+        batch_size: int,
+        device: torch.device,
+        denoise_level: float | None | torch.Tensor,
     ) -> torch.Tensor:
         pipe = self._cosmos_pipe
         assert pipe is not None
         if denoise_level is None:
             sigma_b = pipe.scheduler.sample_sigma(batch_size).to(device=device, dtype=torch.float32)
+        elif isinstance(denoise_level, torch.Tensor):
+            if denoise_level.ndim != 1 or int(denoise_level.shape[0]) != batch_size:
+                raise ValueError(
+                    f"denoise_level tensor must be 1D of shape ({batch_size},), got {tuple(denoise_level.shape)}"
+                )
+            level = denoise_level.to(device=device, dtype=torch.float32).clamp(0.0, 1.0)
+            scfg = pipe.scheduler.config
+            sigma_b = scfg.sigma_min + level * (scfg.sigma_max - scfg.sigma_min)
         else:
             level = float(denoise_level)
             level = max(0.0, min(1.0, level))
@@ -497,7 +494,7 @@ class CosmosVideoAdapter(nn.Module):
     def maybe_extract_intermediate_features(
         self,
         frames: torch.Tensor,
-        denoise_level: float | None = None,
+        denoise_level: float | None | torch.Tensor = None,
         *,
         prompt: str | None = None,
         return_metadata: bool = False,
@@ -507,15 +504,21 @@ class CosmosVideoAdapter(nn.Module):
         Requires CUDA, ``use_external_cosmos=True``, and a successful Cosmos pipeline load.
         ``frames`` is ``[B, C, T, H, W]`` (dataset range ``[0,1]`` or ``[-1,1]`` float, or uint8).
 
+        ``denoise_level``:
+            ``None`` — sample σ per batch row from the training scheduler.
+            ``float`` — same normalized level in ``[0, 1]`` for every row (broadcast).
+            1D ``torch.Tensor`` of shape ``(B,)`` — one level per row (e.g. batched uniform noise).
+
         Returns:
             If ``return_metadata`` is False: same as before — tensor or ``None``.
             If ``return_metadata`` is True: ``(tensor, meta)`` or ``None``. ``meta`` includes
-            ``prompt`` (str), ``denoise_level`` (``float | None``, argument passed in), and
-            ``sigma_b`` (``torch.Tensor`` on CPU, shape ``[B]``, effective noise scale per batch item
-            after ``_sample_sigma_bt``, including ``adjust_video_noise`` scaling).
+            ``prompt`` (str), ``denoise_level`` (``float | None`` or 1D float ``torch.Tensor`` on CPU
+            with shape ``(B,)`` when a tensor was passed in), and ``sigma_b`` (``torch.Tensor`` on CPU,
+            shape ``[B]``, effective noise scale per batch item after ``_sample_sigma_bt``,
+            including ``adjust_video_noise`` scaling).
 
-            If ``cosmos_intermediate_pool`` is ``\"mean\"``: feature tensor is ``[B, feature_dim]`` (projected if needed).
-            If ``\"none\"``: ``[B, T', H', W', D]`` patch-grid tensor after block k.
+            If ``cosmos_intermediate_pool`` is ``\"mean\"``: global mean over spatial–temporal dims → ``[B, D]`` where ``D`` is DiT ``model_channels`` (no learned projection in the adapter).
+            If ``\"none\"``: raw patch-grid tensor after block ``k`` (typically ``[B, C, T', H', W']``).
             ``None`` when Cosmos is unavailable or inputs are not on CUDA.
         """
 
@@ -564,22 +567,20 @@ class CosmosVideoAdapter(nn.Module):
         if pool == "none":
             feats = h_out
         elif pool == "mean":
-            pooled = h_out.mean(dim=(1, 2, 3))
-            if self.cosmos_intermediate_proj is not None:
-                w = self.cosmos_intermediate_proj.weight
-                if pooled.dtype != w.dtype:
-                    pooled = pooled.to(dtype=w.dtype)
-                feats = self.cosmos_intermediate_proj(pooled)
-            else:
-                feats = pooled
+            feats = h_out.mean(dim=(1, 2, 3))
         else:
             raise ValueError(f"Unknown cosmos_intermediate_pool {pool!r}, expected 'mean' or 'none'")
 
         if return_metadata:
             sigma_b_cpu = sigma_bt_used.squeeze(-1).detach().cpu().float()
+            dl_meta: float | None | torch.Tensor
+            if isinstance(denoise_level, torch.Tensor):
+                dl_meta = denoise_level.detach().cpu().float().contiguous()
+            else:
+                dl_meta = denoise_level
             meta: dict[str, Any] = {
                 "prompt": text_prompt,
-                "denoise_level": denoise_level,
+                "denoise_level": dl_meta,
                 "sigma_b": sigma_b_cpu,
             }
             return feats, meta
@@ -976,10 +977,6 @@ class CosmosAdapter(nn.Module):
 
         self.runtime: Any | None = None
         self.runtime_error: Exception | None = None
-        self.runtime_encode_proj: nn.Module = nn.Identity()
-        self.runtime_hidden_proj: nn.Module = nn.Identity()
-        self._runtime_encode_in_dim: int | None = None
-        self._runtime_hidden_in_dim: int | None = None
 
         self.encoder = SimpleVisualFeatureExtractor(image_channels, feature_dim)
         self.hidden_stack = nn.ModuleList(
@@ -996,16 +993,6 @@ class CosmosAdapter(nn.Module):
 
     def _default_repo_path(self) -> Path:
         return Path(__file__).resolve().parents[3] / "cosmos-predict2"
-
-    def _ensure_runtime_projections(self, encode_dim: int, hidden_dim: int, device: torch.device) -> None:
-        if self._runtime_encode_in_dim != encode_dim:
-            self.runtime_encode_proj = nn.Identity() if encode_dim == self.feature_dim else nn.Linear(encode_dim, self.feature_dim)
-            self.runtime_encode_proj.to(device=device)
-            self._runtime_encode_in_dim = encode_dim
-        if self._runtime_hidden_in_dim != hidden_dim:
-            self.runtime_hidden_proj = nn.Identity() if hidden_dim == self.feature_dim else nn.Linear(hidden_dim, self.feature_dim)
-            self.runtime_hidden_proj.to(device=device)
-            self._runtime_hidden_in_dim = hidden_dim
 
     def _ensure_runtime(self) -> None:
         if self.runtime is not None or self.runtime_error is not None or not self.use_external_runtime:
@@ -1053,12 +1040,7 @@ class CosmosAdapter(nn.Module):
         self._ensure_runtime()
         if self.runtime is not None and hasattr(self.runtime, "encode_tokens"):
             encoded = self.runtime.encode_tokens(frames)
-            self._ensure_runtime_projections(
-                encode_dim=int(encoded.tokens.shape[-1]),
-                hidden_dim=getattr(self.runtime, "hidden_dim", int(encoded.tokens.shape[-1])),
-                device=encoded.tokens.device,
-            )
-            return self.runtime_encode_proj(encoded.tokens.float())
+            return encoded.tokens.float()
         return self._encode_fallback(frames)
 
     def encode_multiview(self, frame_views: list[torch.Tensor]) -> torch.Tensor:
@@ -1122,14 +1104,8 @@ class CosmosAdapter(nn.Module):
                 noise_level=resolved_noise,
                 texts=texts,
             )
-            hidden_dim = int(denoise_output.hidden_tokens[0].shape[-1]) if denoise_output.hidden_tokens else self.feature_dim
-            self._ensure_runtime_projections(
-                encode_dim=int(denoise_output.encoded_tokens.shape[-1]),
-                hidden_dim=hidden_dim,
-                device=denoise_output.encoded_tokens.device,
-            )
-            encoded_features = self.runtime_encode_proj(denoise_output.encoded_tokens.float())
-            hidden_states = [self.runtime_hidden_proj(hidden.float()) for hidden in denoise_output.hidden_tokens]
+            encoded_features = denoise_output.encoded_tokens.float()
+            hidden_states = [hidden.float() for hidden in denoise_output.hidden_tokens]
             return CosmosDenoiseState(
                 encoded_features=encoded_features,
                 hidden_states=hidden_states,

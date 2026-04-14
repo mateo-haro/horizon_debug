@@ -7,6 +7,7 @@ import torch
 from horizon.backbones.cosmos_adapter import CosmosAdapter
 from horizon.compat import PreTrainedPolicy
 from horizon.configuration_horizon_dit import HorizonDiTConfig
+from horizon.future_sources.base import FUTURE_SOURCE_IDS
 from horizon.future_sources.sources import (
     CurrentOnlyFutureSource,
     GeneratedFutureSource,
@@ -15,9 +16,11 @@ from horizon.future_sources.sources import (
     OracleHiddenFutureSource,
     OracleNoisedConfig,
     OracleNoisedFutureSource,
+    PrecomputedFutureSource,
 )
 from horizon.models.action_dit import ActionDiT, ActionDiTConfig
 from horizon.models.action_flow import ActionFlowMatcher
+from horizon.models.visual_latent_projection import VisualLatentProjection
 from horizon.utils.batch import (
     get_action_chunk,
     get_image_sequences,
@@ -36,25 +39,35 @@ class HorizonDiTPolicy(PreTrainedPolicy):
         super().__init__(config, *args, **kwargs)
         config.validate_features()
 
-        self.cosmos = CosmosAdapter(
-            feature_dim=config.cosmos_feature_dim,
-            hidden_layer_index=config.cosmos_hidden_layer,
-            noise_level=config.cosmos_noise_level,
-            num_hidden_layers=config.cosmos_num_hidden_layers,
-            device=config.device,
-            use_external_runtime=config.cosmos_use_external_runtime,
-            external_module=config.cosmos_external_module,
-            repo_path=config.cosmos_repo_path,
-            model_size=config.cosmos_model_size,
-            resolution=config.cosmos_resolution,
-            fps=config.cosmos_fps,
-            lora_checkpoint=config.cosmos_lora_checkpoint,
-            lora_rank=config.cosmos_lora_rank,
-            lora_alpha=config.cosmos_lora_alpha,
-            lora_target_modules=config.cosmos_lora_target_modules,
-            prompt_refiner_enabled=config.cosmos_prompt_refiner_enabled,
-            guardrail_enabled=config.cosmos_guardrail_enabled,
+        self.visual_latent_proj = VisualLatentProjection(
+            encode_in_dim=config.cosmos_encode_token_dim,
+            hidden_in_dim=config.cosmos_hidden_token_dim,
+            out_dim=config.cosmos_feature_dim,
+            use_latent_projection=config.use_latent_projection,
         )
+
+        if config.use_precomputed_cosmos_latents:
+            self.cosmos = None
+        else:
+            self.cosmos = CosmosAdapter(
+                feature_dim=config.cosmos_feature_dim,
+                hidden_layer_index=config.cosmos_hidden_layer,
+                noise_level=config.cosmos_noise_level,
+                num_hidden_layers=config.cosmos_num_hidden_layers,
+                device=config.device,
+                use_external_runtime=config.cosmos_use_external_runtime,
+                external_module=config.cosmos_external_module,
+                repo_path=config.cosmos_repo_path,
+                model_size=config.cosmos_model_size,
+                resolution=config.cosmos_resolution,
+                fps=config.cosmos_fps,
+                lora_checkpoint=config.cosmos_lora_checkpoint,
+                lora_rank=config.cosmos_lora_rank,
+                lora_alpha=config.cosmos_lora_alpha,
+                lora_target_modules=config.cosmos_lora_target_modules,
+                prompt_refiner_enabled=config.cosmos_prompt_refiner_enabled,
+                guardrail_enabled=config.cosmos_guardrail_enabled,
+            )
         self.model = ActionDiT(
             ActionDiTConfig(
                 action_dim=config.action_dim,
@@ -100,6 +113,8 @@ class HorizonDiTPolicy(PreTrainedPolicy):
             return oracle_noised
         if config.future_source == "oracle_hidden":
             return oracle_hidden
+        if config.future_source == "precomputed":
+            return PrecomputedFutureSource(future_key=config.precomputed_future_key)
         if config.future_source == "generated":
             return GeneratedFutureSource()
         if config.future_source == "mixed":
@@ -115,25 +130,47 @@ class HorizonDiTPolicy(PreTrainedPolicy):
         raise ValueError(f"Unknown future source: {config.future_source}")
 
     def _build_conditioning(self, batch: dict[str, Any], mode: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        image_sequences = get_image_sequences(batch, self.config.image_keys)
-        current_views = []
-        future_views = []
-        for sequence in image_sequences:
-            current, future = split_current_future(
-                sequence=sequence,
-                current_obs_steps=self.config.current_obs_steps,
-                future_obs_steps=self.config.future_obs_steps,
+        if self.config.use_precomputed_cosmos_latents:
+            if self.config.precomputed_curr_key not in batch or self.config.precomputed_future_key not in batch:
+                raise KeyError(
+                    "use_precomputed_cosmos_latents=True requires batch keys "
+                    f"{self.config.precomputed_curr_key!r} and {self.config.precomputed_future_key!r}."
+                )
+            curr_vis = self.visual_latent_proj.forward_encode(batch[self.config.precomputed_curr_key])
+            future_vis = self.visual_latent_proj.forward_hidden(batch[self.config.precomputed_future_key])
+            future_mask = torch.ones(future_vis.shape[:2], dtype=torch.bool, device=future_vis.device)
+            future_source_id = torch.full(
+                (curr_vis.shape[0],),
+                FUTURE_SOURCE_IDS["precomputed"],
+                dtype=torch.long,
+                device=curr_vis.device,
             )
-            current_views.append(current)
-            future_views.append(future)
+            metadata: dict[str, Any] = {}
+        else:
+            assert self.cosmos is not None
+            image_sequences = get_image_sequences(batch, self.config.image_keys)
+            current_views = []
+            future_views = []
+            for sequence in image_sequences:
+                current, future = split_current_future(
+                    sequence=sequence,
+                    current_obs_steps=self.config.current_obs_steps,
+                    future_obs_steps=self.config.future_obs_steps,
+                )
+                current_views.append(current)
+                future_views.append(future)
 
-        curr_vis = self.cosmos.encode_multiview(current_views)
-        future_output = self.future_source.get_future_condition(
-            future_frame_views=future_views,
-            batch=batch,
-            backbone=self.cosmos,
-            mode=mode,
-        )
+            curr_vis = self.visual_latent_proj.forward_encode(self.cosmos.encode_multiview(current_views))
+            future_output = self.future_source.get_future_condition(
+                future_frame_views=future_views,
+                batch=batch,
+                backbone=self.cosmos,
+                mode=mode,
+            )
+            future_vis = self.visual_latent_proj.forward_hidden(future_output.future_vis)
+            future_mask = future_output.future_mask
+            future_source_id = future_output.future_source_id
+            metadata = future_output.metadata
 
         proprio_sequence = get_state_sequence(batch, self.config.proprio_key)
         proprio = None
@@ -147,13 +184,13 @@ class HorizonDiTPolicy(PreTrainedPolicy):
         task_texts = get_task_texts(batch, self.config.libero_suite if self.config.use_task_text else None)
         conditioning = {
             "curr_vis": curr_vis,
-            "future_vis": future_output.future_vis,
-            "future_mask": future_output.future_mask,
+            "future_vis": future_vis,
+            "future_mask": future_mask,
             "proprio": proprio,
             "text": task_texts,
-            "future_source_id": future_output.future_source_id,
+            "future_source_id": future_source_id,
         }
-        return conditioning, future_output.metadata
+        return conditioning, metadata
 
     def get_optim_params(self) -> dict:
         return {"params": self.parameters()}

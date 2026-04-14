@@ -9,6 +9,7 @@ from horizon.future_sources.sources import (
     OracleHiddenFutureSource,
     OracleNoisedConfig,
     OracleNoisedFutureSource,
+    PrecomputedFutureSource,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "OracleHiddenFutureSource",
     "OracleNoisedConfig",
     "OracleNoisedFutureSource",
+    "PrecomputedFutureSource",
 ]

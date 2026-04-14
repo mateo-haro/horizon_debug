@@ -69,6 +69,15 @@ class HorizonDiTConfig(PreTrainedConfig):
     cosmos_prompt_refiner_enabled: bool = False
     cosmos_guardrail_enabled: bool = False
 
+    # Raw Cosmos token dims (Predict2 tokenizer vs DiT hidden). Policy projects to ``cosmos_feature_dim``.
+    cosmos_encode_token_dim: int = 256
+    cosmos_hidden_token_dim: int = 256
+    use_latent_projection: bool = True
+
+    use_precomputed_cosmos_latents: bool = False
+    precomputed_curr_key: str = "horizon.precomputed_curr_vis"
+    precomputed_future_key: str = "horizon.precomputed_future_vis"
+
     use_proprio: bool = True
     use_task_text: bool = True
     libero_suite: str | None = None

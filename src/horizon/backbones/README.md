@@ -11,20 +11,20 @@ This folder wraps **Cosmos Predict2 Video2World** behind [`cosmos_adapter.py`](c
 
 ---
 
-## `CosmosAdapter` and `CosmosAdapterConfig`
+## `CosmosVideoAdapter` and `CosmosAdapterConfig`
 
-`CosmosAdapter` loads `Video2WorldPipeline` when `use_external_cosmos=True`, freezes the DiT and (by default) T5, and exposes:
+`CosmosVideoAdapter` loads `Video2WorldPipeline` when `use_external_cosmos=True`, freezes the DiT and (by default) T5, and exposes:
 
-- **`maybe_extract_intermediate_features(frames, denoise_level=..., prompt=..., return_metadata=False)`** — Runs **one** `pipe.denoise(...)` forward (not full multi-step sampling). Registers a forward hook on DiT block `cosmos_block_index`, corrupts latents with `x_t = x_0 + σ·ε`, and returns either mean-pooled features (optional linear projection to `feature_dim`) or the full patch grid when `cosmos_intermediate_pool="none"`. Inputs must be **`frames` on CUDA** with shape **`[B, C, T, H, W]`** (uint8 or float in `[0,1]` / `[-1,1]`).
+- **`maybe_extract_intermediate_features(frames, denoise_level=..., prompt=..., return_metadata=False)`** — Runs **one** `pipe.denoise(...)` forward (not full multi-step sampling). Registers a forward hook on DiT block `cosmos_block_index`, corrupts latents with `x_t = x_0 + σ·ε`, and returns either **mean-pooled** DiT activations (`cosmos_intermediate_pool="mean"`, last dim = DiT `model_channels`) or the **raw** block grid (`"none"`). There is **no learned `Linear` in the adapter**; map latents to `cosmos_feature_dim` in **`HorizonDiTPolicy`** via `VisualLatentProjection` (see `horizon/models/visual_latent_projection.py`). Inputs must be **`frames` on CUDA** with shape **`[B, C, T, H, W]`** (uint8 or float in `[0,1]` / `[-1,1]`). **`denoise_level`** may be **`None`** (scheduler samples one σ per batch row), a **scalar float** in `[0,1]` (same level for every row), or a **1D float tensor of shape `(B,)`** (one level per row, e.g. batched uniform noise).
 
 ### Config fields (`CosmosAdapterConfig`)
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `feature_dim` | *(required)* | Target dimension when pooling is `"mean"` and a projection is created from DiT width → `feature_dim`. |
+| `feature_dim` | *(required)* | Used for the lightweight CNN fallback encoder and `empty_future_features`; not a learned projection target for Video2World intermediates. |
 | `use_external_cosmos` | `False` | Must be **`True`** to load the Video2World pipeline. |
 | `external_cosmos_module` | `None` | Optional import hook; usually `None`. |
-| `freeze_backbone` | `False` | If `True`, no gradients on encoder, projection, text encoder, DiT. |
+| `freeze_backbone` | `False` | If `True`, no gradients on encoder, text encoder, DiT. |
 | `image_channels` | `3` | RGB. |
 | `cosmos_block_index` | `0` | Which DiT block output to capture (clamped to valid range). |
 | `cosmos_model_size` | `"2B"` | Checkpoint family (e.g. `2B`). |
@@ -38,12 +38,12 @@ This folder wraps **Cosmos Predict2 Video2World** behind [`cosmos_adapter.py`](c
 | `cosmos_default_prompt` | `""` | Used when `prompt=None` in feature extraction. |
 | `cosmos_num_conditional_frames` | `5` | First *N* time steps treated as conditioning (frame-replace strategy). |
 | `cosmos_conditioning_strategy` | `"frame_replace"` | `"frame_replace"` keeps first N frames clean in `denoise`; `"channel_concat"` is the alternative upstream mode. |
-| `cosmos_intermediate_pool` | `"none"` | `"mean"` → global average over space-time then optional projection; `"none"` → raw block output grid. |
+| `cosmos_intermediate_pool` | `"none"` | `"mean"` → global average over space-time (DiT channel dim); `"none"` → raw block output grid. **Default in** `extract_libero_cosmos_intermediates.py` **is** `"none"` (raw). |
 | `cosmos_offload_text_encoder` | `True` | Keep T5 on CPU until encode (lower peak VRAM at init). |
 | `cosmos_downcast_text_encoder` | `True` | Dtype for T5. |
 | `cosmos_verbose_load` | `False` | stderr logs during load; or set `HORIZON_COSMOS_DEBUG=1`. |
 
-With `return_metadata=True`, `maybe_extract_intermediate_features` also returns a dict with `prompt`, `denoise_level` (argument, or `None` if the scheduler sampled σ), and `sigma_b` (per-batch effective σ after pipeline scaling).
+With `return_metadata=True`, `maybe_extract_intermediate_features` also returns a dict with `prompt`, `denoise_level` (scalar or `None` as passed in, or a **CPU float tensor `(B,)`** when a per-row tensor was passed), and `sigma_b` (per-batch effective σ after pipeline scaling, shape `(B,)` on CPU).
 
 ---
 
@@ -102,9 +102,9 @@ python scripts/cosmos_intermediate_demo.py --dit-path /path/to/model-480p-10fps.
 
 ## Script: `extract_libero_cosmos_intermediates.py`
 
-**What it does:** Reads episodes from a **VideoDataset** layout (same as `cosmos-predict2/scripts/prepare_libero_cosmos_dataset.py`): `videos/*.mp4` and optional `metas/*.txt` captions. For each episode, slides a window of length `W` over **every** start index `0 … T−W` (one **batch size = 1** forward per window). Saves `torch.load`-able dicts under `--out-dir/<episode_stem>/`.
+**What it does:** Reads episodes from a **VideoDataset** layout (same as `cosmos-predict2/scripts/prepare_libero_cosmos_dataset.py`): `videos/*.mp4` and optional `metas/*.txt` captions. Builds an **extended timeline** per episode: `num_conditional_frames` copies of frame **0** before the real video, then all real frames `0 … T−1`, then (if needed) copies of the **last** frame so the extended length is at least `W` when `T + num_conditional_frames < W`. It slides a window of length `W` over every virtual start `0 … L−W` (`L` = extended length). Saves one `torch.load`-able dict per window under `--out-dir/<episode_stem>/`.
 
-**Inference:** Not batched across windows; each window is a separate `maybe_extract_intermediate_features` call.
+**Inference:** `--batch-size` (default `1`) stacks that many windows from the **same episode** into one `maybe_extract_intermediate_features` call; the last chunk in an episode may be smaller, and the next episode starts a new chunk at the full batch size. With `noise-mode=uniform`, per-window levels are passed as a `(B,)` tensor to the adapter.
 
 ### Data layout
 
@@ -120,14 +120,18 @@ python scripts/cosmos_intermediate_demo.py --dit-path /path/to/model-480p-10fps.
 
 Pattern:
 
-`window_<start>_<end>_<noise_tag>.pt`
+`window_h<head>_r<real_lo>_<real_hi>_t<tail>_<noise_tag>.pt`
 
-- `<start>` / `<end>`: **0-based** frame indices; `<end>` is **exclusive** (covers `[start, end)`).
+- **`head`**: count of window slots filled from the **leading** synthetic region (repeats of frame 0).
+- **`tail`**: count of window slots filled from the **trailing** synthetic region (repeats of the last real frame).
+- **`real_lo`**, **`real_hi`**: half-open range of **original video** indices covered by real frames in this window (`-1` / `-1` if the window has no real frames).
 - **noise_tag**
   - **`dl` + value**: normalized `denoise_level` in `[0,1]`. The filename uses `p` instead of `.` (e.g. `dl0p500000` → **0.5**).
   - **`sg` + value**: effective σ when the scheduler sampled noise (`denoise_level=None`); same `p`/`m` encoding.
 
-Each payload includes `features`, `prompt`, `denoise_level`, `sigma_b`, frame indices, paths, `noise_tag`, `output_filename`, etc.
+Human-readable episode hints are also stored in the payload as `notation_episode_prefix` (e.g. `-5...` for five leading synthetic frames) and `notation_episode_suffix` (e.g. `...150+40` when the last real index is 150 and 40 tail synthetic frames were appended to the episode).
+
+Each payload includes `features`, `prompt`, `denoise_level`, `sigma_b`, `virtual_start` / `virtual_end_exclusive`, `prefix_pad_episode`, `suffix_pad_episode`, `window_head_pad`, `window_tail_pad`, `real_start`, `real_end_exclusive`, `start_frame` / `end_frame` (same as the virtual range for compatibility), `batch_size_effective`, paths, `noise_tag`, `output_filename`, etc.
 
 ### Arguments
 
@@ -147,12 +151,13 @@ Each payload includes `features`, `prompt`, `denoise_level`, `sigma_b`, frame in
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--window-frames` | `93` | Window length `W` (Libero Cosmos default). Episodes with `T < W` are skipped. |
+| `--window-frames` | `93` | Window length `W` (Libero Cosmos default). |
+| `--batch-size` | `1` | Windows per GPU forward (same episode only). |
 | `--noise-mode` | `fixed` | `fixed` \| `scheduler` \| `uniform`. |
 | `--denoise-level` | `0.5` | Used when `noise-mode=fixed`. |
-| `--denoise-min`, `--denoise-max` | `0`, `1` | Used when `noise-mode=uniform` (per-window sample). |
+| `--denoise-min`, `--denoise-max` | `0`, `1` | Used when `noise-mode=uniform` (per-window sample; batched as a tensor). |
 | `--seed` | `42` | Python + PyTorch RNG. |
-| `--skip-existing` | off | Skip if output file exists (see script help for scheduler vs fixed/uniform). |
+| `--skip-existing` | off | Skip if output exists; for `fixed`/`uniform`, skips a whole batch only when **all** candidate files in that batch already exist. |
 
 **Cosmos (aligned with `eval_libero_cosmos.py` defaults)**
 
@@ -160,7 +165,7 @@ Each payload includes `features`, `prompt`, `denoise_level`, `sigma_b`, frame in
 |----------|---------|-------------|
 | `--feature-dim` | `128` | |
 | `--block` | `0` | DiT block index. |
-| `--pool` | `mean` | `mean` or `none`. |
+| `--pool` | `none` | `none` (raw grid, default) or `mean` (global mean, DiT width). |
 | `--dit-path` | `None` | |
 | `--checkpoints-root` | `None` | |
 | `--model-size` | `2B` | |
